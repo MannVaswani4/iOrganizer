@@ -1,0 +1,12 @@
+# Python runtime and generated files
+.venv/
+__pycache__/
+*.py[cod]
+
+# Local app data
+/data/*.db
+/data/*.sqlite*
+
+# macOS and editor files
+.DS_Store
+.vscode/

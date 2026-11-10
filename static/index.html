@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f8f9ff">
+  <title>iOrganizer · Personal workspace</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <a class="brand" href="#dashboard" aria-label="iOrganizer home"><span class="brand-mark">i</span><span>iOrganizer</span></a>
+      <div class="privacy"><i></i> Local storage · private</div>
+      <p class="nav-label">Personal workspace</p>
+      <nav class="nav" aria-label="Main navigation">
+        <button data-view="dashboard" class="nav-item active"><span class="icon">▦</span>Dashboard</button>
+        <button data-view="inbox" class="nav-item"><span class="icon">▤</span>Inbox <span class="nav-count" id="inbox-count">0</span></button>
+        <button data-view="calendar" class="nav-item"><span class="icon">▦</span>Calendar</button>
+        <button data-view="notes" class="nav-item"><span class="icon">▧</span>Notes</button>
+        <button data-view="imports" class="nav-item"><span class="icon">⇩</span>Imports <span class="nav-count amber hidden" id="import-count">0</span></button>
+      </nav>
+      <div class="sidebar-bottom">
+        <div class="local-note"><span class="icon">♧</span><div><b>On-device vault active</b><small>Your information stays here.</small></div></div>
+        <div class="profile"><span class="avatar">Y</span><div><b>Your workspace</b><small>Personal organizer</small></div></div>
+      </div>
+    </aside>
+    <main class="main-area">
+      <header class="topbar">
+        <label class="search"><span class="icon">⌕</span><input id="search" type="search" placeholder="Search tasks, notes, or events…"><kbd>⌘ K</kbd></label>
+        <div class="top-actions"><span class="local-status"><i></i>Stored on this device</span><button class="button secondary" id="import-top">＋ Import file</button><button class="button primary" id="new-item">＋ New item</button></div>
+      </header>
+      <section class="page-head"><div><p class="eyebrow"><i></i> YOUR PERSONAL WORKSPACE</p><h1 id="page-title">Good day.</h1><p class="subtitle" id="page-subtitle">Everything important, together in one place.</p></div><div class="date-chip" id="date-chip"></div></section>
+      <section class="capture-card" aria-label="Quick capture">
+        <div class="capture-symbol">✦</div><div class="capture-fields"><input id="capture-title" placeholder="Capture a task, event, or note…" maxlength="200"><div class="capture-options"><select id="capture-kind" aria-label="Item type"><option value="task">Task</option><option value="event">Event</option><option value="note">Note</option><option value="link">Link</option></select><input id="capture-category" placeholder="Category (optional)" maxlength="80"><button class="button primary" id="capture-submit">Capture <span>↵</span></button></div></div>
+      </section>
+      <section id="import-banner" class="import-banner hidden"><span class="banner-icon">⇩</span><div class="banner-copy"><b>Suggestions ready for review</b><span id="banner-copy">Review extracted items before adding them to your organizer.</span></div><button class="button primary" id="review-imports">Review suggestions →</button><button class="icon-button" id="dismiss-banner" aria-label="Dismiss">×</button></section>
+      <section class="toolbar"><div class="filters" id="filters"><button class="filter active" data-kind="all">All</button><button class="filter" data-kind="task">Tasks</button><button class="filter" data-kind="event">Events</button><button class="filter" data-kind="note">Notes</button></div><span class="result-count" id="result-count"></span></section>
+      <section class="content-grid">
+        <div class="primary-column"><div class="section-heading"><div><p class="eyebrow">YOUR ITEMS</p><h2 id="list-heading">Tasks needing attention</h2></div><select id="sort-select" class="sort-select" aria-label="Sort items"><option value="newest">Recently added</option><option value="title">Title A–Z</option></select></div><div id="item-list" class="item-list"></div><div id="empty-state" class="empty-state hidden"><div class="empty-illustration">✦</div><h2>Your space is ready</h2><p>Capture your first task or import a calendar or chat export to get started.</p><button class="button primary" id="empty-import">Import a file</button></div></div>
+        <aside class="right-column"><section class="side-card"><div class="section-heading compact"><div><p class="eyebrow">OVERVIEW</p><h2>Your organizer</h2></div><span class="overview-icon">◷</span></div><div class="stat-row"><span>Open tasks</span><b id="task-stat">0</b></div><div class="stat-row"><span>Upcoming events</span><b id="event-stat">0</b></div><div class="stat-row"><span>Notes captured</span><b id="note-stat">0</b></div></section><section class="side-card"><div class="section-heading compact"><div><p class="eyebrow">COLLECT</p><h2>Bring it together</h2></div></div><p class="side-copy">Import a calendar or chat export and review the suggestions before saving.</p><button class="button secondary full" id="import-card">Choose a file</button><p class="file-hint">.ics calendar · .txt chat export · up to 1 MB</p></section><section class="privacy-card"><span class="privacy-icon">♧</span><div><b>Private by design</b><p>Your organizer runs locally. Imports happen only when you choose a file.</p></div></section></aside>
+      </section>
+      <footer class="footer">iOrganizer <span>·</span> Your personal information, organized on your device.</footer>
+    </main>
+  </div>
+  <input type="file" id="file-input" accept=".ics,.txt" hidden>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <dialog id="item-dialog" class="dialog"><form method="dialog" id="item-form"><div class="dialog-head"><div><p class="eyebrow">ITEM DETAILS</p><h2 id="dialog-title">New item</h2></div><button class="icon-button" value="cancel" aria-label="Close">×</button></div><input type="hidden" id="item-id"><label>Title<input id="item-title" required maxlength="200"></label><div class="form-row"><label>Type<select id="item-kind"><option value="task">Task</option><option value="event">Event</option><option value="note">Note</option><option value="link">Link</option></select></label><label>Status<select id="item-status"><option value="open">Open</option><option value="done">Done</option><option value="archived">Archived</option></select></label></div><div class="form-row"><label>Category<input id="item-category" maxlength="80"></label><label>Due date<input id="item-due" type="datetime-local"></label></div><label>Notes<textarea id="item-body" rows="4" maxlength="20000"></textarea></label><div class="dialog-actions"><button type="button" class="button danger hidden" id="delete-item">Delete</button><span class="spacer"></span><button class="button secondary" value="cancel">Cancel</button><button type="button" class="button primary" id="save-item">Save item</button></div></form></dialog>
+  <dialog id="review-dialog" class="dialog wide"><div class="dialog-head"><div><p class="eyebrow">IMPORT REVIEW</p><h2>Review suggestions</h2><p class="dialog-subtitle" id="review-source">Suggestions from your selected file.</p></div><button class="icon-button" id="close-review" aria-label="Close">×</button></div><div id="suggestion-list" class="suggestion-list"></div><p class="review-footnote">Nothing is added until you choose Accept. Imported text is processed by this local app.</p></dialog>
+  <script src="/static/app.js" defer></script>
+</body>
+</html>
