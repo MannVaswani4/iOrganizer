@@ -23,12 +23,16 @@ from .domain import Candidate, ItemKind
 from .photo_ocr import PhotoOcrError, extract_text
 
 
+CALENDAR_READ_SCOPE = "https://www.googleapis.com/auth/calendar.events.readonly"
+CALENDAR_WRITE_SCOPE = "https://www.googleapis.com/auth/calendar.events"
 SCOPES = (
-    "https://www.googleapis.com/auth/calendar.events.readonly",
+    CALENDAR_WRITE_SCOPE,
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/photospicker.mediaitems.readonly",
 )
-CALENDAR_SCOPE, GMAIL_SCOPE, PHOTOS_SCOPE = SCOPES
+CALENDAR_SCOPE = CALENDAR_WRITE_SCOPE
+GMAIL_SCOPE = SCOPES[1]
+PHOTOS_SCOPE = SCOPES[2]
 KEYRING_SERVICE = "iorganizer-google-oauth"
 KEYRING_ACCOUNT = "local-user"
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -151,7 +155,10 @@ def load_credentials(*, required_scope: str | None = None) -> Credentials:
     if not serialized:
         raise GoogleNotConnected("Connect your Google account first.")
     try:
-        credentials = Credentials.from_authorized_user_info(json.loads(serialized), scopes=list(SCOPES))
+        # Preserve the scopes actually granted and serialized by Google. Passing the
+        # app's current desired scopes here would incorrectly make an old read-only
+        # token look as if it already had Calendar write access.
+        credentials = Credentials.from_authorized_user_info(json.loads(serialized))
     except (ValueError, TypeError, json.JSONDecodeError) as exc:
         raise GoogleIntegrationError("Stored Google authorization is invalid. Disconnect and reconnect.") from exc
     if credentials.expired and credentials.refresh_token:
@@ -172,14 +179,17 @@ def connection_status() -> dict:
     try:
         credentials = load_credentials()
     except GoogleNotConnected:
-        return {"connected": False, "calendar": False, "gmail": False, "photos": False, "scopes": []}
+        return {"connected": False, "calendar": False, "calendar_write": False,
+                "gmail": False, "photos": False, "scopes": []}
     except GoogleIntegrationError as exc:
-        return {"connected": False, "calendar": False, "gmail": False, "photos": False,
+        return {"connected": False, "calendar": False, "calendar_write": False,
+                "gmail": False, "photos": False,
                 "scopes": [], "error": str(exc)}
     granted = set(credentials.granted_scopes or credentials.scopes or [])
     return {
         "connected": True,
-        "calendar": CALENDAR_SCOPE in granted,
+        "calendar": CALENDAR_SCOPE in granted or CALENDAR_READ_SCOPE in granted,
+        "calendar_write": CALENDAR_SCOPE in granted,
         "gmail": GMAIL_SCOPE in granted,
         "photos": PHOTOS_SCOPE in granted,
         "scopes": sorted(granted),
@@ -254,7 +264,7 @@ def _raise_google_error(response, label: str) -> dict:
 def sync_calendar(pipeline: AgentPipeline, session: AuthorizedSession) -> list[Candidate]:
     credentials = session.credentials
     granted = set(credentials.granted_scopes or credentials.scopes or [])
-    if CALENDAR_SCOPE not in granted:
+    if not ({CALENDAR_SCOPE, CALENDAR_READ_SCOPE} & granted):
         return []
     now = datetime.now(timezone.utc)
     params = {
@@ -292,6 +302,38 @@ def sync_calendar(pipeline: AgentPipeline, session: AuthorizedSession) -> list[C
         if not page_token:
             break
     return candidates
+
+
+def create_calendar_event(*, event_id: str, title: str, description: str,
+                          start_at: datetime, end_at: datetime | None = None) -> dict:
+    credentials = load_credentials(required_scope=CALENDAR_WRITE_SCOPE)
+    session = AuthorizedSession(credentials)
+    start = start_at if start_at.tzinfo else start_at.astimezone()
+    end = end_at if end_at and end_at.tzinfo else (end_at.astimezone() if end_at else None)
+    if end is None:
+        end = start + timedelta(minutes=30)
+    if end <= start:
+        raise GoogleIntegrationError("Calendar event end time must be after its start time.")
+    payload = {
+        "id": event_id,
+        "summary": title[:200],
+        "description": description[:20_000],
+        "start": {"dateTime": start.isoformat()},
+        "end": {"dateTime": end.isoformat()},
+    }
+    try:
+        response = session.post(urljoin(CALENDAR_API, "calendars/primary/events"), json=payload, timeout=30)
+        if response.status_code == 409:
+            result = _raise_google_error(
+                session.get(urljoin(CALENDAR_API, f"calendars/primary/events/{event_id}"), timeout=30),
+                "Google Calendar event lookup",
+            )
+        else:
+            result = _raise_google_error(response, "Google Calendar event creation")
+        save_credentials(credentials)
+        return result
+    finally:
+        session.close()
 
 
 def sync_google_sources(pipeline: AgentPipeline, sources: tuple[GoogleSource, ...] | None = None) -> list[Candidate]:

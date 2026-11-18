@@ -61,6 +61,9 @@ class Candidate:
     category: str
     due_at: datetime | None = None
     source_ref: str | None = None
+    event_start_at: datetime | None = None
+    event_end_at: datetime | None = None
+    is_pinned: bool = False
 
 
 @dataclass

@@ -26,16 +26,17 @@ Collect user-selected information from scattered sources into one private, searc
 | FR-6 | Accept a suggestion into the inbox | `POST /api/v1/suggestions/{id}/accept` |
 | FR-7 | Store accepted items in local SQLite | SQLAlchemy repository |
 | FR-8 | Preserve source and provenance for imported suggestions | `source_ref` in suggestion response; `source=import` on accepted item |
-| FR-9 | Connect Google with read-only OAuth and collect Calendar events / relevant Gmail messages as suggestions | `/api/v1/google/authorize`, `/api/v1/google/sync` |
+| FR-9 | Connect Google; read Calendar, Gmail, and Photos Picker sources; request Calendar event write access only for user-triggered event creation | `/api/v1/google/authorize`, `/api/v1/google/sync` |
 | FR-10 | Import only Google Photos explicitly selected through Picker; OCR locally | `/api/v1/google/photos/sessions` |
 | FR-11 | Deduplicate Google records and refresh Calendar/Gmail every 30 minutes while local server is running | Source IDs, `/api/v1/google/status` |
-| FR-12 | Scan every non-Spam/non-Trash/non-Draft Gmail message with a local importance classifier | `/api/v1/google/gmail/scan` |
-| FR-13 | Create review suggestions only for important messages, using a concise summary | `LocalEmailTriageAgent`, Gmail scan results |
-| FR-14 | Persist scan checkpoints and message IDs to resume safely without retaining unimportant email bodies | `GmailTriageStore` in local SQLite |
+| FR-12 | Scan every non-Spam/non-Trash/non-Draft Gmail message and keep only security, meeting/evaluation, deadline, and payment actions | `/api/v1/google/gmail/scan` |
+| FR-13 | Extract concise summary and dates; add meeting suggestions to Google Calendar after a user action | `LocalEmailTriageAgent`, `/api/v1/suggestions/{id}/calendar-event` |
+| FR-14 | Pin/unpin important email summaries in a persistent dedicated section | `/api/v1/google/gmail/saved`, `/api/v1/suggestions/{id}/pin` |
+| FR-15 | Persist scan checkpoints and message IDs to resume safely without retaining unimportant email bodies | `GmailTriageStore` in local SQLite |
 
 ## Non-functional requirements
 
-- **Privacy:** local storage; read-only Google scopes; explicit Photos selection; email inference uses Ollama on loopback with no hosted model; review before saving.
+- **Privacy:** local storage; Gmail read-only and explicit Photos selection; event writes require a user click and a Calendar write scope; email inference uses Ollama on loopback with no hosted model.
 - **Cost:** every required runtime component is free/open-source; optional AI runs locally.
 - **Maintainability:** depend on repository and extractor abstractions, not concrete implementations.
 - **Usability:** OpenAPI docs at `/docs`; imports return suggestions for review.
@@ -49,9 +50,9 @@ Collect user-selected information from scattered sources into one private, searc
 2. **Collect from export:** user uploads a file; import boundary checks size/type/encoding; extractor proposes candidates; user reviews and accepts selected candidate(s).
 3. **Find information:** user searches; service delegates to repository; matching items return newest first.
 4. **Remove item:** user deletes by identifier; repository reports whether an item existed.
-5. **Connect Google:** user consents to read-only scopes; OAuth tokens are kept in macOS Keychain; Calendar/Gmail records are fetched locally, deduplicated, and presented for review.
+5. **Connect Google:** user consents to Calendar/Gmail/Photos scopes; OAuth tokens are kept in macOS Keychain; Calendar/Gmail records are fetched locally, deduplicated, and presented for review. Calendar writes happen only on an explicit review action.
 6. **Select photos:** user chooses images in Google Photos Picker; the app downloads selected images temporarily, extracts text with local OCR, and presents candidates for review.
-7. **Triage Gmail:** local background worker pages through the mailbox; local model marks each message important or unimportant; only a concise summary from important mail enters the review inbox.
+7. **Triage Gmail:** local background worker pages through the mailbox; local model selects only security, meeting/evaluation, deadline, or payment actions, extracts relevant dates and concise summaries, and routes them to review. Users may pin summaries or create Calendar events from meeting suggestions.
 
 ## Assumptions and scope
 

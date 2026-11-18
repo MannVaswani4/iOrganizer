@@ -13,8 +13,9 @@ Personal commitments and useful information are scattered across calendars, conv
 - Create, view, update, search, and archive organizer items.
 - Add a quick note or task through the API.
 - Import `.ics` calendar files, plain-text chat exports, and user-selected photos through explicit upload endpoints. Photo text is extracted locally with Tesseract OCR; source images are temporary and are not saved.
-- Optionally connect Google Calendar, Gmail, and Google Photos Picker with read-only OAuth. Calendar sync runs while the local server is running; Gmail uses a local full-mailbox triage agent; Photos only processes pictures selected in Google's picker.
-- Scan the full non-Spam/non-Trash/non-Draft Gmail mailbox with a local Ollama model. Only messages the model considers important become concise summaries for review; original email bodies are not stored.
+- Optionally connect Google Calendar, Gmail, and Google Photos Picker. Calendar event creation requires the Calendar events write scope; Gmail and Photos Picker remain read-only/user-selected.
+- Scan Gmail with a local Ollama model for only four actionable categories: account security, meetings/evaluations, deadlines, and payments. Extract dates and concise summaries for review; original email bodies are not stored.
+- Add meeting suggestions to the primary Google Calendar from review, and pin important email summaries to a persistent Important emails section.
 - Run a deterministic, explainable extraction pipeline; review suggestions before accepting them.
 - Store data in local SQLite. Keep source, provenance, and processing status with every imported item.
 - Export/backup can be added without changing the source adapter interfaces.
@@ -49,7 +50,7 @@ brew services start ollama
 ollama pull qwen2.5:1.5b
 ```
 
-The initial Gmail scan resumes from a local SQLite checkpoint, and later checks look for recent mail every 30 minutes while the app is running. Calendar also syncs every 30 minutes. In OAuth Testing mode, Google may expire refresh tokens after seven days, requiring reconnection. Google Photos uses a separate Picker session and imports up to 10 selected images per session for local OCR.
+The initial Gmail scan resumes from a local SQLite checkpoint, and later checks look for recent mail every 30 minutes while the app is running. Calendar also syncs every 30 minutes. If you already connected Google before enabling meeting creation, click **Enable Calendar event creation** and approve the updated permission once. In OAuth Testing mode, Google may expire refresh tokens after seven days, requiring reconnection. Google Photos uses a separate Picker session and imports up to 10 selected images per session for local OCR.
 
 ## Repository guide
 
@@ -68,6 +69,6 @@ The initial Gmail scan resumes from a local SQLite checkpoint, and later checks 
 3. Inspect the proposed items in the import response.
 4. Review a photo OCR note or extracted task suggestion, then accept it with `POST /api/v1/suggestions/{id}/accept`.
 5. Search/filter the unified inbox with `GET /api/v1/items`.
-6. Start **Scan all emails** from the Google panel and watch the local scan progress; accept only summarized important email suggestions.
+6. Scan Gmail and review the extracted Security, Meetings/evaluations, Deadlines, and Payments suggestions. Pin messages to Important emails, or add meeting suggestions to Google Calendar.
 
 See the docs for requirements traceability and design justification.

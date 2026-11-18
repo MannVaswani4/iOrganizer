@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import secrets
 import threading
 import time
 from contextlib import asynccontextmanager, suppress
+from dataclasses import replace
 from datetime import datetime
 from uuid import UUID
 
@@ -70,6 +72,23 @@ class SuggestionResponse(BaseModel):
     kind: ItemKind
     category: str
     source_ref: str | None
+    due_at: str | None = None
+    event_start_at: str | None = None
+    event_end_at: str | None = None
+    is_pinned: bool = False
+
+
+class CalendarEventRequest(BaseModel):
+    start_at: datetime | None = None
+    end_at: datetime | None = None
+
+
+class SavedEmailResponse(BaseModel):
+    message_id: str
+    title: str
+    summary: str
+    category: str
+    received_at: str | None
 
 
 sessions, _engine = make_database()
@@ -86,6 +105,18 @@ suggestion_lock = threading.Lock()
 gmail_scan_lock = threading.Lock()
 gmail_scan_running = False
 gmail_scan_error: str | None = None
+calendar_event_lock = threading.Lock()
+
+
+def suggestion_response(suggestion_id: int, candidate: Candidate) -> SuggestionResponse:
+    return SuggestionResponse(
+        id=suggestion_id, title=candidate.title, body=candidate.body, kind=candidate.kind,
+        category=candidate.category, source_ref=candidate.source_ref,
+        due_at=candidate.due_at.isoformat() if candidate.due_at else None,
+        event_start_at=candidate.event_start_at.isoformat() if candidate.event_start_at else None,
+        event_end_at=candidate.event_end_at.isoformat() if candidate.event_end_at else None,
+        is_pinned=candidate.is_pinned,
+    )
 
 
 def add_candidate_suggestions(candidates: list[Candidate]) -> int:
@@ -144,12 +175,6 @@ def start_gmail_scan() -> bool:
     with gmail_scan_lock:
         if gmail_scan_running:
             return False
-        state = gmail_store.scan_state()
-        gmail_store.save_scan_state(
-            page_token=state["page_token"], initial_complete=state["initial_complete"],
-            scan_kind=state["scan_kind"], messages_seen=state["messages_seen"],
-            messages_classified=state["messages_classified"], important_found=state["important_found"],
-        )
         gmail_scan_running = True
         gmail_scan_error = None
         threading.Thread(target=run_gmail_scan, name="iorganizer-gmail-scan", daemon=True).start()
@@ -210,6 +235,100 @@ def health() -> dict[str, str]:
 def google_status() -> dict:
     return {**google.connection_status(), "last_sync": last_google_sync,
             "sync_error": google_sync_error, "sync_interval_minutes": 30}
+
+
+@app.get("/api/v1/google/gmail/saved", response_model=list[SavedEmailResponse])
+def list_saved_emails() -> list[SavedEmailResponse]:
+    return [SavedEmailResponse(**record) for record in gmail_store.saved_emails()]
+
+
+@app.delete("/api/v1/google/gmail/saved/{message_id}", status_code=204)
+def unpin_saved_email(message_id: str) -> None:
+    try:
+        gmail_store.set_pinned(message_id, False)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.post("/api/v1/suggestions/{suggestion_id}/pin")
+def pin_important_email(suggestion_id: int) -> dict:
+    with suggestion_lock:
+        candidate = suggestions.get(suggestion_id)
+    if candidate is None or not candidate.source_ref or not candidate.source_ref.startswith("gmail:"):
+        raise HTTPException(404, "Gmail suggestion not found")
+    message_id = candidate.source_ref.removeprefix("gmail:")
+    try:
+        gmail_store.set_pinned(message_id, True)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    with suggestion_lock:
+        current = suggestions.get(suggestion_id)
+        if current:
+            suggestions[suggestion_id] = replace(current, is_pinned=True)
+    return {"pinned": True, "message_id": message_id}
+
+
+@app.delete("/api/v1/suggestions/{suggestion_id}/pin", status_code=204)
+def unpin_important_email(suggestion_id: int) -> None:
+    with suggestion_lock:
+        candidate = suggestions.get(suggestion_id)
+    if candidate is None or not candidate.source_ref or not candidate.source_ref.startswith("gmail:"):
+        raise HTTPException(404, "Gmail suggestion not found")
+    message_id = candidate.source_ref.removeprefix("gmail:")
+    try:
+        gmail_store.set_pinned(message_id, False)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    with suggestion_lock:
+        current = suggestions.get(suggestion_id)
+        if current:
+            suggestions[suggestion_id] = replace(current, is_pinned=False)
+
+
+@app.post("/api/v1/suggestions/{suggestion_id}/calendar-event")
+def create_suggestion_calendar_event(suggestion_id: int, request: CalendarEventRequest) -> dict:
+    with suggestion_lock:
+        candidate = suggestions.get(suggestion_id)
+    if (candidate is None or candidate.category != "meeting" or not candidate.source_ref
+            or not candidate.source_ref.startswith("gmail:")):
+        raise HTTPException(404, "Meeting suggestion not found")
+    if not google.connection_status().get("calendar_write"):
+        raise HTTPException(403, "Enable Google Calendar event creation, then retry.")
+    message_id = candidate.source_ref.removeprefix("gmail:")
+    start_at = request.start_at or candidate.event_start_at
+    if start_at is None:
+        raise HTTPException(422, "Add the meeting date and time before creating a calendar event.")
+    end_at = request.end_at or candidate.event_end_at
+    if start_at.tzinfo is None:
+        start_at = start_at.astimezone()
+    if end_at and end_at.tzinfo is None:
+        end_at = end_at.astimezone()
+    if end_at and end_at <= start_at:
+        raise HTTPException(422, "Meeting end time must be after its start time.")
+
+    with calendar_event_lock:
+        row = gmail_store.get_message(message_id)
+        event_id = row.calendar_event_id if row else None
+        if not event_id:
+            event_id = hashlib.sha256(f"iorganizer:{message_id}".encode()).hexdigest()
+            try:
+                google.create_calendar_event(event_id=event_id, title=candidate.title,
+                                             description=candidate.body, start_at=start_at, end_at=end_at)
+            except google.GoogleNotConnected as exc:
+                raise HTTPException(401, str(exc)) from exc
+            except google.GoogleIntegrationError as exc:
+                raise HTTPException(502, str(exc)) from exc
+        source_ref = f"google-calendar:{event_id}"
+        item = next((saved for saved in service.list_items() if saved.source_ref == source_ref), None)
+        if item is None:
+            calendar_candidate = replace(candidate, kind=ItemKind.EVENT, due_at=start_at,
+                                         event_start_at=start_at, event_end_at=end_at,
+                                         source_ref=source_ref)
+            item = accept_candidate(service, calendar_candidate)
+        gmail_store.set_calendar_event_id(message_id, event_id)
+        with suggestion_lock:
+            suggestions.pop(suggestion_id, None)
+    return {"item": ItemResponse.from_item(item), "calendar_event_id": event_id}
 
 
 @app.get("/api/v1/google/gmail/scan/status")
@@ -340,16 +459,13 @@ async def google_photos_import(session_key: str) -> dict:
         suggestion_id = next_suggestion_id
         next_suggestion_id += 1
         suggestions[suggestion_id] = candidate
-        output.append(SuggestionResponse(id=suggestion_id, title=candidate.title, body=candidate.body,
-                                         kind=candidate.kind, category=candidate.category,
-                                         source_ref=candidate.source_ref))
+        output.append(suggestion_response(suggestion_id, candidate))
     return {"processed": processed, "suggestions": output}
 
 
 @app.get("/api/v1/suggestions", response_model=list[SuggestionResponse])
 def list_suggestions() -> list[SuggestionResponse]:
-    return [SuggestionResponse(id=key, title=value.title, body=value.body, kind=value.kind,
-                               category=value.category, source_ref=value.source_ref)
+    return [suggestion_response(key, value)
             for key, value in suggestions.items()]
 
 
@@ -438,9 +554,7 @@ async def import_file(file: UploadFile = File(...)) -> list[SuggestionResponse]:
         suggestion_id = next_suggestion_id
         next_suggestion_id += 1
         suggestions[suggestion_id] = candidate
-        output.append(SuggestionResponse(id=suggestion_id, title=candidate.title, body=candidate.body,
-                                         kind=candidate.kind, category=candidate.category,
-                                         source_ref=candidate.source_ref))
+        output.append(suggestion_response(suggestion_id, candidate))
     return output
 
 @app.post("/api/v1/suggestions/{suggestion_id}/accept", response_model=ItemResponse, status_code=201)

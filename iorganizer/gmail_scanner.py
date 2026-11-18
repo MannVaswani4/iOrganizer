@@ -10,7 +10,7 @@ from google.auth.transport.requests import AuthorizedSession
 
 from .domain import Candidate, ItemKind
 from .email_agent import EmailTriageResult, LocalEmailTriageAgent
-from .email_store import GmailTriageStore
+from .email_store import TRIAGE_VERSION, GmailTriageStore
 from .google_integrations import (GMAIL_SCOPE, GoogleIntegrationError, GoogleNotConnected,
                                  GmailMessagesConnector, _decode_gmail_body, load_credentials)
 
@@ -50,12 +50,14 @@ class GmailMailboxScanner:
         credentials = load_credentials(required_scope=GMAIL_SCOPE)
         session = AuthorizedSession(credentials)
         state = self.store.scan_state()
-        initial_complete = state["initial_complete"]
+        same_version = state["triage_version"] == TRIAGE_VERSION
+        initial_complete = state["initial_complete"] if same_version else False
         recent_only = initial_complete
-        page_token = state["page_token"] if state["scan_kind"] == ("recent" if recent_only else "initial") else None
-        seen = state["messages_seen"]
-        classified = state["messages_classified"]
-        important_total = state["important_found"]
+        page_token = (state["page_token"] if same_version and
+                      state["scan_kind"] == ("recent" if recent_only else "initial") else None)
+        seen = state["messages_seen"] if same_version else 0
+        classified = state["messages_classified"] if same_version else 0
+        important_total = state["important_found"] if same_version else 0
         try:
             while True:
                 result = self.connector.list_page(session, page_token=page_token, recent_only=recent_only)
@@ -94,13 +96,24 @@ class GmailMailboxScanner:
                         "summary": triage.summary if triage.important else None,
                         "category": triage.category if triage.important else None,
                         "received_at": received_at,
+                        "due_at": triage.due_at if triage.important else None,
+                        "event_start_at": triage.event_start_at if triage.important else None,
+                        "event_end_at": triage.event_end_at if triage.important else None,
                     })
                     classified += 1
-                    if triage.important:
+                    if triage.important and self.store.should_review(message_id):
                         important_total += 1
-                        candidates.append(Candidate(title=subject[:200], body=triage.summary,
-                                                    kind=ItemKind.NOTE, category=triage.category,
-                                                    source_ref=f"gmail:{message_id}"))
+                        is_meeting = triage.category == "meeting"
+                        candidates.append(Candidate(
+                            title=(triage.event_title or subject)[:200], body=triage.summary,
+                            kind=ItemKind.EVENT if is_meeting else ItemKind.TASK,
+                            category=triage.category,
+                            due_at=triage.event_start_at if is_meeting else triage.due_at,
+                            source_ref=f"gmail:{message_id}",
+                            event_start_at=triage.event_start_at,
+                            event_end_at=triage.event_end_at,
+                            is_pinned=self.store.is_pinned(message_id),
+                        ))
                     else:
                         ignored_refs.append(f"gmail:{message_id}")
                     if len(records) >= 10:

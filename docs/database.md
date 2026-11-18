@@ -22,11 +22,11 @@ The class `OrganizerItem` maps one-to-one to `items`. There is no user table in 
 
 ## `gmail_message_triage`
 
-One row per processed Gmail message. The primary key is the Gmail message ID for deduplication and restart safety. `is_important` records the local model decision; `title`, `summary`, and `category` are populated only for important messages. `review_state` is `pending`, `accepted`, `dismissed`, or `ignored`. The original email body and sender are never stored. `received_at` supports ordering.
+One row per processed Gmail message. The primary key is the Gmail message ID for deduplication and restart safety. `is_important` is true only for security, meeting/evaluation, deadline, and payment actions. `title`, `summary`, extracted `due_at`, `event_start_at`, and `event_end_at` contain selected information only; raw body and sender are not stored. `review_state` tracks pending/accepted/dismissed/ignored; `is_pinned` preserves a chosen summary in Important emails. `calendar_event_id` prevents duplicate Calendar creation, and `triage_version` allows rule/model changes to reprocess messages.
 
 ## `gmail_scan_state`
 
-Single-row local checkpoint with Gmail `page_token`, whether the initial mailbox backfill is complete, active scan kind, counts, last scan timestamp, and last error. This lets the mailbox scanner resume after app restart or API failure. Scan state is single-user and keyed by ID 1.
+Single-row local checkpoint with Gmail `page_token`, whether the initial mailbox backfill is complete, active scan kind, counters, triage version, last scan timestamp, and last error. A changed classifier version restarts pagination so historical mail is re-evaluated. Scan state is single-user and keyed by ID 1.
 
 ## Indexes and relationships
 

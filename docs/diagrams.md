@@ -21,6 +21,10 @@ classDiagram
       +ItemKind kind
       +string category
       +string source_ref
+      +datetime due_at
+      +datetime event_start_at
+      +datetime event_end_at
+      +bool is_pinned
     }
     class OrganizerService {
       +create_item(...) OrganizerItem
@@ -49,6 +53,32 @@ classDiagram
     class PhotoOCR {
       +extract_text(image_bytes, filename) string
     }
+    class LocalEmailTriageAgent {
+      +classify(subject, sender, received_at, body) EmailTriageResult
+    }
+    class GmailMailboxScanner {
+      +scan(on_important, on_ignored) void
+    }
+    class GmailTriageStore {
+      +pending_candidates() Candidate[]
+      +set_pinned(message_id, pinned) void
+      +saved_emails() SavedEmail[]
+    }
+    class GmailMessageTriageRow {
+      +string message_id
+      +bool is_important
+      +string category
+      +string summary
+      +datetime due_at
+      +datetime event_start_at
+      +datetime event_end_at
+      +bool is_pinned
+      +string calendar_event_id
+      +string review_state
+    }
+    class GoogleCalendarAPI {
+      +create_calendar_event(event_id, summary, start, end) Event
+    }
     OrganizerService --> ItemRepository : depends on
     OrganizerService --> AgentPipeline : uses
     SqlAlchemyItemRepository ..|> ItemRepository : implements
@@ -58,6 +88,11 @@ classDiagram
     PhotoOCR ..> AgentPipeline : supplies local OCR text
     ItemRepository o--> OrganizerItem : stores 0..*
     OrganizerService ..> OrganizerItem : creates
+    GmailMailboxScanner --> LocalEmailTriageAgent : classifies with
+    GmailMailboxScanner --> GmailTriageStore : checkpoints and persists
+    GmailMailboxScanner ..> Candidate : creates actionable proposals
+    GmailTriageStore "1" *-- "0..*" GmailMessageTriageRow : owns local results
+    GoogleCalendarAPI ..> OrganizerService : calendar event becomes local item
 ```
 
 Composition is appropriate for service-to-repository/pipeline references; the repository aggregates independently-lived items. Each item has one repository identity; one service can use one repository and one pipeline. The arrow/cardinality notation is conceptual; Python object references are not ownership of item lifetimes.
@@ -218,4 +253,28 @@ sequenceDiagram
     end
     Review-->>Scanner: User accepts or dismisses
     Scanner->>Store: Persist review state
+```
+
+## Review meeting and pin an important email
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant Review as Review section
+    participant API as FastAPI
+    participant Store as GmailTriageStore / SQLite
+    participant Google as Google Calendar API
+    participant Items as OrganizerService / SQLite
+    User->>Review: Pin an important email
+    Review->>API: POST /suggestions/{id}/pin
+    API->>Store: Set is_pinned=true
+    Review->>API: GET /google/gmail/saved
+    API-->>Review: Pinned summaries
+    User->>Review: Add meeting to Calendar
+    Review->>API: POST /suggestions/{id}/calendar-event
+    API->>Google: Insert primary-calendar event with stable ID
+    Google-->>API: Event ID
+    API->>Items: Save local event linked to Calendar
+    API->>Store: Save event ID and accepted state
+    API-->>Review: Calendar event and organizer item
 ```

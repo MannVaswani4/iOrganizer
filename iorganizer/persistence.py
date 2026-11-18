@@ -38,9 +38,14 @@ class GmailMessageTriageRow(Base):
     summary: Mapped[str | None] = mapped_column(Text)
     category: Mapped[str | None] = mapped_column(String(80))
     received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    event_start_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    event_end_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    calendar_event_id: Mapped[str | None] = mapped_column(String(256))
+    is_pinned: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     processed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     review_state: Mapped[str] = mapped_column(String(20), nullable=False, default="pending", index=True)
-    triage_version: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
+    triage_version: Mapped[int] = mapped_column(Integer, nullable=False, default=4)
 
 
 class GmailScanStateRow(Base):
@@ -52,6 +57,7 @@ class GmailScanStateRow(Base):
     messages_seen: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     messages_classified: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     important_found: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    triage_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     last_scan_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_error: Mapped[str | None] = mapped_column(String(500))
 
@@ -110,9 +116,22 @@ def make_database(database_url: str | None = None) -> tuple[sessionmaker[Session
     engine = create_engine(url, connect_args={"check_same_thread": False} if url.startswith("sqlite") else {})
     Base.metadata.create_all(engine)
     columns = {column["name"] for column in inspect(engine).get_columns("gmail_message_triage")}
-    if "triage_version" not in columns:
+    migrations = {
+        "triage_version": "INTEGER NOT NULL DEFAULT 1",
+        "due_at": "TIMESTAMP",
+        "event_start_at": "TIMESTAMP",
+        "event_end_at": "TIMESTAMP",
+        "calendar_event_id": "VARCHAR(256)",
+        "is_pinned": "BOOLEAN NOT NULL DEFAULT FALSE",
+    }
+    for column, sql_type in migrations.items():
+        if column not in columns:
+            with engine.begin() as connection:
+                connection.execute(text(f"ALTER TABLE gmail_message_triage ADD COLUMN {column} {sql_type}"))
+    scan_columns = {column["name"] for column in inspect(engine).get_columns("gmail_scan_state")}
+    if "triage_version" not in scan_columns:
         with engine.begin() as connection:
             connection.execute(text(
-                "ALTER TABLE gmail_message_triage ADD COLUMN triage_version INTEGER NOT NULL DEFAULT 1"
+                "ALTER TABLE gmail_scan_state ADD COLUMN triage_version INTEGER NOT NULL DEFAULT 1"
             ))
     return sessionmaker(engine, expire_on_commit=False), engine
