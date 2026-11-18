@@ -28,8 +28,8 @@ Collect user-selected information from scattered sources into one private, searc
 | FR-8 | Preserve source and provenance for imported suggestions | `source_ref` in suggestion response; `source=import` on accepted item |
 | FR-9 | Connect Google; read Calendar, Gmail, and Photos Picker sources; request Calendar event write access only for user-triggered event creation | `/api/v1/google/authorize`, `/api/v1/google/sync` |
 | FR-10 | Import only Google Photos explicitly selected through Picker; OCR locally | `/api/v1/google/photos/sessions` |
-| FR-11 | Deduplicate Google records and refresh Calendar/Gmail every 30 minutes while local server is running | Source IDs, `/api/v1/google/status` |
-| FR-12 | Scan every non-Spam/non-Trash/non-Draft Gmail message and keep only security, meeting/evaluation, deadline, and payment actions | `/api/v1/google/gmail/scan` |
+| FR-11 | Deduplicate Google records; refresh Calendar every 30 minutes and Gmail's rolling three-day window every three days while the app is running | Source IDs, `/api/v1/google/status` |
+| FR-12 | Scan Gmail messages received in the last three days, excluding Spam/Trash/Drafts, and keep only security, meeting/evaluation, deadline, and payment actions | `/api/v1/google/gmail/scan` |
 | FR-13 | Extract concise summary and dates; add meeting suggestions to Google Calendar after a user action | `LocalEmailTriageAgent`, `/api/v1/suggestions/{id}/calendar-event` |
 | FR-14 | Pin/unpin important email summaries in a persistent dedicated section | `/api/v1/google/gmail/saved`, `/api/v1/suggestions/{id}/pin` |
 | FR-15 | Persist scan checkpoints and message IDs to resume safely without retaining unimportant email bodies | `GmailTriageStore` in local SQLite |

@@ -50,7 +50,7 @@ brew services start ollama
 ollama pull qwen2.5:1.5b
 ```
 
-The initial Gmail scan resumes from a local SQLite checkpoint, and later checks look for recent mail every 30 minutes while the app is running. Calendar also syncs every 30 minutes. If you already connected Google before enabling meeting creation, click **Enable Calendar event creation** and approve the updated permission once. In OAuth Testing mode, Google may expire refresh tokens after seven days, requiring reconnection. Google Photos uses a separate Picker session and imports up to 10 selected images per session for local OCR.
+Gmail scans messages received in the last three days, resumes from a local SQLite checkpoint, and automatically refreshes that window every three days while iOrganizer is running. Calendar syncs every 30 minutes. If you already connected Google before enabling meeting creation, click **Enable Calendar event creation** and approve the updated permission once. In OAuth Testing mode, Google may expire refresh tokens after seven days, requiring reconnection. Google Photos uses a separate Picker session and imports up to 10 selected images per session for local OCR.
 
 ## Repository guide
 

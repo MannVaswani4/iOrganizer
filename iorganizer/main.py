@@ -8,7 +8,7 @@ import threading
 import time
 from contextlib import asynccontextmanager, suppress
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 from fastapi import FastAPI, File, HTTPException, UploadFile, Request
@@ -191,13 +191,25 @@ async def auto_google_sync() -> None:
         try:
             status = google.connection_status()
             if status.get("connected"):
-                if status.get("calendar"):
+                now = datetime.now().astimezone()
+                last_sync = datetime.fromisoformat(last_google_sync) if last_google_sync else None
+                last_sync = (last_sync.replace(tzinfo=now.tzinfo) if last_sync and last_sync.tzinfo is None
+                             else last_sync)
+                if status.get("calendar") and (last_sync is None or now - last_sync >= timedelta(minutes=30)):
                     await run_in_threadpool(collect_google_suggestions)
-                if status.get("gmail") and email_agent.status()["model_ready"]:
+                scan_state = gmail_store.scan_state()
+                last_scan = datetime.fromisoformat(scan_state["last_scan_at"]) if scan_state["last_scan_at"] else None
+                if last_scan and last_scan.tzinfo is None:
+                    last_scan = last_scan.replace(tzinfo=timezone.utc)
+                retry_after = timedelta(minutes=30) if scan_state["last_error"] else timedelta(days=3)
+                scan_due = (not scan_state["initial_complete"] or last_scan is None or
+                            now - last_scan >= retry_after)
+                if (status.get("gmail") and email_agent.status()["model_ready"] and
+                        not gmail_scan_running and scan_due):
                     start_gmail_scan()
         except Exception as exc:
             google_sync_error = str(exc)[:300]
-        await asyncio.sleep(1800)
+        await asyncio.sleep(300)
 
 
 @asynccontextmanager
@@ -234,7 +246,8 @@ def health() -> dict[str, str]:
 @app.get("/api/v1/google/status")
 def google_status() -> dict:
     return {**google.connection_status(), "last_sync": last_google_sync,
-            "sync_error": google_sync_error, "sync_interval_minutes": 30}
+            "sync_error": google_sync_error, "sync_interval_minutes": 30,
+            "gmail_scan_interval_days": 3}
 
 
 @app.get("/api/v1/google/gmail/saved", response_model=list[SavedEmailResponse])

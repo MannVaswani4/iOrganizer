@@ -72,7 +72,7 @@ class GmailMessagesConnector:
 
     def list_page(self, session: AuthorizedSession, *, page_token: str | None, recent_only: bool) -> dict:
         params: dict[str, str | int] = {"maxResults": 500, "includeSpamTrash": "false",
-                                        "q": "newer_than:30d -in:drafts" if recent_only else "-in:drafts"}
+                                        "q": "newer_than:3d -in:drafts"}
         if page_token:
             params["pageToken"] = page_token
         return _raise_google_error(

@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from .domain import Candidate, ItemKind
 from .persistence import GmailMessageTriageRow, GmailScanStateRow
 
-TRIAGE_VERSION = 4
+TRIAGE_VERSION = 5
 
 
 class GmailTriageStore:

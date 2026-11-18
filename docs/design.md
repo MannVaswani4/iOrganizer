@@ -4,7 +4,7 @@
 
 `FastAPI router → OrganizerService → ItemRepository interface → SQLAlchemy adapter → SQLite`
 
-File imports use `router → AgentPipeline → ContentExtractor strategy → Candidate`; candidates become persistent items only after explicit acceptance. Calendar reads use the `GoogleSource` adapter. Gmail backfill uses `GmailMessagesConnector → GmailMailboxScanner → LocalEmailTriageAgent → GmailTriageStore`; its Ollama model is constrained to loopback and selects only security, meeting/evaluation, deadline, or payment actions. It extracts summaries and dates. Users may persistently pin summaries or create a Google Calendar event from a meeting review. Google Photos Picker is a separate user-selection adapter; selected image bytes pass to local OCR. OAuth credentials remain in Keychain. Domain objects do not depend on FastAPI or SQLAlchemy.
+File imports use `router → AgentPipeline → ContentExtractor strategy → Candidate`; candidates become persistent items only after explicit acceptance. Calendar reads use the `GoogleSource` adapter. Gmail's rolling three-day window uses `GmailMessagesConnector → GmailMailboxScanner → LocalEmailTriageAgent → GmailTriageStore`; the Ollama model is constrained to loopback and selects only security, meeting/evaluation, deadline, or payment actions. It extracts summaries and dates. Users may persistently pin summaries or create a Google Calendar event from a meeting review. Google Photos Picker is a separate user-selection adapter; selected image bytes pass to local OCR. OAuth credentials remain in Keychain. Domain objects do not depend on FastAPI or SQLAlchemy.
 
 ## Main classes and responsibilities
 

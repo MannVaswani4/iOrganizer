@@ -26,7 +26,7 @@ One row per processed Gmail message. The primary key is the Gmail message ID for
 
 ## `gmail_scan_state`
 
-Single-row local checkpoint with Gmail `page_token`, whether the initial mailbox backfill is complete, active scan kind, counters, triage version, last scan timestamp, and last error. A changed classifier version restarts pagination so historical mail is re-evaluated. Scan state is single-user and keyed by ID 1.
+Single-row local checkpoint with Gmail `page_token`, whether the initial three-day scan is complete, active scan kind, counters, triage version, last scan timestamp, and last error. A changed classifier version restarts pagination within the configured three-day window. Scan state is single-user and keyed by ID 1.
 
 ## Indexes and relationships
 
