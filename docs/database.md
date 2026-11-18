@@ -20,6 +20,14 @@ Database: local SQLite (`./data/iorganizer.db`), created automatically. SQLAlche
 
 The class `OrganizerItem` maps one-to-one to `items`. There is no user table in the local single-user MVP. The API receives UUID primary keys; imports carry provenance in candidate `source_ref`, which is retained when accepted.
 
+## `gmail_message_triage`
+
+One row per processed Gmail message. The primary key is the Gmail message ID for deduplication and restart safety. `is_important` records the local model decision; `title`, `summary`, and `category` are populated only for important messages. `review_state` is `pending`, `accepted`, `dismissed`, or `ignored`. The original email body and sender are never stored. `received_at` supports ordering.
+
+## `gmail_scan_state`
+
+Single-row local checkpoint with Gmail `page_token`, whether the initial mailbox backfill is complete, active scan kind, counts, last scan timestamp, and last error. This lets the mailbox scanner resume after app restart or API failure. Scan state is single-user and keyed by ID 1.
+
 ## Indexes and relationships
 
-SQLite creates the primary-key index on `id`. Add indexes on `(status, due_at)` and `created_at` when list volume warrants them; current MVP search uses title/body `LIKE` and is suitable only for small personal datasets. A production extension should add `import_batches(id, source_type, filename, status, created_at)` and `suggestions(id, batch_id FK, candidate_json, accepted_item_id FK nullable, reviewed_at)` with an index on `suggestions.batch_id`. This creates batch composition (one batch has many suggestions) and optional accepted-item association.
+SQLite creates primary-key indexes on item IDs and Gmail message IDs. Add indexes on `(status, due_at)` and `created_at` when list volume warrants them; current item search uses title/body `LIKE` and is suitable only for small personal datasets. A production extension should add `import_batches(id, source_type, filename, status, created_at)` and `suggestions(id, batch_id FK, candidate_json, accepted_item_id FK nullable, reviewed_at)` with an index on `suggestions.batch_id`. This creates batch composition (one batch has many suggestions) and optional accepted-item association.

@@ -63,9 +63,25 @@ class CalendarConnector(GoogleSource):
         return sync_calendar(pipeline, session)
 
 
-class GmailConnector(GoogleSource):
-    def fetch(self, pipeline: AgentPipeline, session: AuthorizedSession) -> list[Candidate]:
-        return sync_gmail(pipeline, session)
+class GmailMessagesConnector:
+    """Paged Gmail API adapter used by the long-running local triage worker."""
+
+    def list_page(self, session: AuthorizedSession, *, page_token: str | None, recent_only: bool) -> dict:
+        params: dict[str, str | int] = {"maxResults": 500, "includeSpamTrash": "false",
+                                        "q": "newer_than:30d -in:drafts" if recent_only else "-in:drafts"}
+        if page_token:
+            params["pageToken"] = page_token
+        return _raise_google_error(
+            session.get(urljoin(GMAIL_API, "users/me/messages"), params=params, timeout=30),
+            "Gmail message listing",
+        )
+
+    def get_message(self, session: AuthorizedSession, message_id: str) -> dict:
+        return _raise_google_error(
+            session.get(urljoin(GMAIL_API, f"users/me/messages/{message_id}"),
+                        params={"format": "full"}, timeout=30),
+            "Gmail message fetch",
+        )
 
 
 def make_oauth_flow(state: str | None = None) -> Flow:
@@ -278,41 +294,11 @@ def sync_calendar(pipeline: AgentPipeline, session: AuthorizedSession) -> list[C
     return candidates
 
 
-def sync_gmail(pipeline: AgentPipeline, session: AuthorizedSession) -> list[Candidate]:
-    credentials = session.credentials
-    granted = set(credentials.granted_scopes or credentials.scopes or [])
-    if GMAIL_SCOPE not in granted:
-        return []
-    query = 'newer_than:14d {deadline due assignment exam reminder meeting "action required"}'
-    listing = _raise_google_error(
-        session.get(urljoin(GMAIL_API, "users/me/messages"), params={"q": query, "maxResults": 25}, timeout=30),
-        "Gmail search",
-    )
-    candidates: list[Candidate] = []
-    for reference in listing.get("messages", []):
-        message_id = reference.get("id")
-        if not message_id:
-            continue
-        message = _raise_google_error(
-            session.get(urljoin(GMAIL_API, f"users/me/messages/{message_id}"), params={"format": "full"}, timeout=30),
-            "Gmail message fetch",
-        )
-        payload = message.get("payload", {})
-        headers = {h.get("name", "").lower(): h.get("value", "") for h in payload.get("headers", [])}
-        subject = (headers.get("subject") or "Email note").strip()[:200]
-        sender = headers.get("from", "")[:300]
-        body = _decode_gmail_body(payload) or message.get("snippet", "")
-        email_source = f"gmail:{message_id}"
-        extracted = pipeline.process_email(subject, sender, body, email_source)
-        candidates.extend(extracted)
-    return candidates
-
-
 def sync_google_sources(pipeline: AgentPipeline, sources: tuple[GoogleSource, ...] | None = None) -> list[Candidate]:
     credentials = load_credentials()
     session = AuthorizedSession(credentials)
     try:
-        selected_sources = sources or (CalendarConnector(), GmailConnector())
+        selected_sources = sources or (CalendarConnector(),)
         candidates = [candidate for source in selected_sources for candidate in source.fetch(pipeline, session)]
         save_credentials(credentials)
         return candidates

@@ -13,7 +13,8 @@ Personal commitments and useful information are scattered across calendars, conv
 - Create, view, update, search, and archive organizer items.
 - Add a quick note or task through the API.
 - Import `.ics` calendar files, plain-text chat exports, and user-selected photos through explicit upload endpoints. Photo text is extracted locally with Tesseract OCR; source images are temporary and are not saved.
-- Optionally connect Google Calendar, Gmail, and Google Photos Picker with read-only OAuth. Calendar/Gmail suggestions sync while the local server is running; Photos only processes pictures selected in Google's picker.
+- Optionally connect Google Calendar, Gmail, and Google Photos Picker with read-only OAuth. Calendar sync runs while the local server is running; Gmail uses a local full-mailbox triage agent; Photos only processes pictures selected in Google's picker.
+- Scan the full non-Spam/non-Trash/non-Draft Gmail mailbox with a local Ollama model. Only messages the model considers important become concise summaries for review; original email bodies are not stored.
 - Run a deterministic, explainable extraction pipeline; review suggestions before accepting them.
 - Store data in local SQLite. Keep source, provenance, and processing status with every imported item.
 - Export/backup can be added without changing the source adapter interfaces.
@@ -25,7 +26,7 @@ The app does not connect to phone-operating-system internals or scrape private a
 - Python 3.11+, FastAPI, Pydantic, SQLAlchemy, SQLite, Pillow, and free local Tesseract OCR
 - macOS HEIC conversion uses the built-in `sips` tool; on iPhone, AirDrop a selected photo to the Mac for the local demo
 - pytest for tests; Mermaid for diagrams
-- Optional local model: Ollama (no hosted model required). The MVP agent strategy is rule-based and works offline without a model.
+- Ollama runs the Gmail triage model locally; imported chat/photo extraction remains deterministic and explainable.
 - No paid APIs, subscriptions, or proprietary cloud services are required.
 - Google API use is subject to Google's quotas and OAuth consent/testing limits; no paid AI or hosted extraction service is used.
 
@@ -40,7 +41,15 @@ uvicorn iorganizer.main:app --reload --port 8765
 
 On macOS, install Tesseract if needed with `brew install tesseract`. Open `http://127.0.0.1:8765/` for the web app or `http://127.0.0.1:8765/docs` for the interactive API. The SQLite database is created at `./data/iorganizer.db` by default. Keep the app bound to localhost; imported calendar/chat content can be sensitive.
 
-To enable Google, place the downloaded **Web application** OAuth JSON at `secrets/client_secret.json`, make sure its authorized redirect URI is exactly `http://127.0.0.1:8765/oauth/google/callback`, enable Calendar API, Gmail API, and Photos Picker API in the Cloud project, and add your Google account as an OAuth test user. Restart the server and click **Connect Google**. The first Calendar/Gmail sync runs after consent; later syncs run every 30 minutes while this server is running. In OAuth Testing mode, Google may expire refresh tokens after seven days, requiring reconnection. Google Photos uses a separate Picker session and imports up to 10 selected images per session for local OCR.
+To enable Google, place the downloaded **Web application** OAuth JSON at `secrets/client_secret.json`, make sure its authorized redirect URI is exactly `http://127.0.0.1:8765/oauth/google/callback`, enable Calendar API, Gmail API, and Photos Picker API in the Cloud project, and add your Google account as an OAuth test user. Restart the server and click **Connect Google**. Install/start the free local email model once:
+
+```bash
+brew install ollama
+brew services start ollama
+ollama pull qwen2.5:1.5b
+```
+
+The initial Gmail scan resumes from a local SQLite checkpoint, and later checks look for recent mail every 30 minutes while the app is running. Calendar also syncs every 30 minutes. In OAuth Testing mode, Google may expire refresh tokens after seven days, requiring reconnection. Google Photos uses a separate Picker session and imports up to 10 selected images per session for local OCR.
 
 ## Repository guide
 
@@ -59,5 +68,6 @@ To enable Google, place the downloaded **Web application** OAuth JSON at `secret
 3. Inspect the proposed items in the import response.
 4. Review a photo OCR note or extracted task suggestion, then accept it with `POST /api/v1/suggestions/{id}/accept`.
 5. Search/filter the unified inbox with `GET /api/v1/items`.
+6. Start **Scan all emails** from the Google panel and watch the local scan progress; accept only summarized important email suggestions.
 
 See the docs for requirements traceability and design justification.

@@ -34,7 +34,9 @@ Base URL: `http://127.0.0.1:8765/api/v1`. JSON UTF-8 unless noted. Interactive O
 
 `GET /google/status` reports connection, granted Calendar/Gmail/Photos permissions, and last sync time. `GET /google/authorize` starts the local OAuth web-server flow; Google redirects to `http://127.0.0.1:8765/oauth/google/callback`. OAuth state expires after ten minutes. `POST /google/disconnect` deletes the local Keychain credentials.
 
-`POST /google/sync` fetches read-only Calendar events (one day past to 60 days ahead) and up to 25 recent Gmail messages matching reminder/task terms. Results are deduplicated by Google source ID and returned as suggestions, never immediately saved. A background task repeats this every 30 minutes while the local server runs. Gmail is limited to the matching search; this is not a full mailbox import.
+`POST /google/sync` fetches read-only Calendar events (one day past to 60 days ahead). Calendar results are deduplicated by source ID and returned as suggestions.
+
+`GET /google/gmail/scan/status` reports local model readiness and mailbox scan progress. `POST /google/gmail/scan` starts or resumes a background scan. On the first run, Gmail `messages.list` is paginated through all messages except Spam, Trash, and Drafts; after backfill, 30-day recent mail is checked every 30 minutes. Each message is fetched and triaged by the local Ollama model. Only important emails produce a short summary suggestion; unimportant bodies are discarded. Message IDs and importance decisions are retained in SQLite to resume scans and avoid repeat model calls. Ollama must be running at `127.0.0.1:11434` with the configured model. No email content is sent to a hosted model. Suggestions are persisted across restarts; accepting/dismissing records their review state. Email attachments are not scanned.
 
 `POST /google/photos/sessions` creates a Google Photos Picker session capped at 10 user-selected items and returns `session_key`, `picker_uri`, and Google's recommended polling interval. Open the picker URI in a browser, then poll `GET /google/photos/sessions/{session_key}`. When `ready` is true, `POST /google/photos/sessions/{session_key}/import` downloads the selected images temporarily, runs local OCR, deletes the remote picker session, and returns reviewable suggestions. Google Photo videos are skipped. Sessions expire after 30 minutes in the local app.
 
@@ -42,9 +44,9 @@ Google client JSON belongs at `secrets/client_secret.json` (ignored by git); OAu
 
 ## List, dismiss, and accept suggestions
 
-`GET /suggestions` lists current process-local suggestions. `DELETE /suggestions/{suggestion_id}` dismisses a proposal. Suggestions are held in memory and cleared when the server restarts.
+`GET /suggestions` lists current suggestions. `DELETE /suggestions/{suggestion_id}` dismisses a proposal. File, Calendar, and Photos suggestions are process-local; Gmail summaries are backed by SQLite and pending Gmail suggestions are restored on restart.
 
-`POST /suggestions/{suggestion_id}/accept` → `201` item response. Suggestion IDs are single-use and currently process-local; unknown/already accepted IDs return 404.
+`POST /suggestions/{suggestion_id}/accept` → `201` item response. Suggestion IDs are single-use; unknown/already accepted IDs return 404.
 
 ## Error shape
 

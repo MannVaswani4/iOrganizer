@@ -29,10 +29,13 @@ Collect user-selected information from scattered sources into one private, searc
 | FR-9 | Connect Google with read-only OAuth and collect Calendar events / relevant Gmail messages as suggestions | `/api/v1/google/authorize`, `/api/v1/google/sync` |
 | FR-10 | Import only Google Photos explicitly selected through Picker; OCR locally | `/api/v1/google/photos/sessions` |
 | FR-11 | Deduplicate Google records and refresh Calendar/Gmail every 30 minutes while local server is running | Source IDs, `/api/v1/google/status` |
+| FR-12 | Scan every non-Spam/non-Trash/non-Draft Gmail message with a local importance classifier | `/api/v1/google/gmail/scan` |
+| FR-13 | Create review suggestions only for important messages, using a concise summary | `LocalEmailTriageAgent`, Gmail scan results |
+| FR-14 | Persist scan checkpoints and message IDs to resume safely without retaining unimportant email bodies | `GmailTriageStore` in local SQLite |
 
 ## Non-functional requirements
 
-- **Privacy:** local storage; read-only Google scopes; explicit Photos selection; no background device scanning or network model calls; review before saving.
+- **Privacy:** local storage; read-only Google scopes; explicit Photos selection; email inference uses Ollama on loopback with no hosted model; review before saving.
 - **Cost:** every required runtime component is free/open-source; optional AI runs locally.
 - **Maintainability:** depend on repository and extractor abstractions, not concrete implementations.
 - **Usability:** OpenAPI docs at `/docs`; imports return suggestions for review.
@@ -48,6 +51,7 @@ Collect user-selected information from scattered sources into one private, searc
 4. **Remove item:** user deletes by identifier; repository reports whether an item existed.
 5. **Connect Google:** user consents to read-only scopes; OAuth tokens are kept in macOS Keychain; Calendar/Gmail records are fetched locally, deduplicated, and presented for review.
 6. **Select photos:** user chooses images in Google Photos Picker; the app downloads selected images temporarily, extracts text with local OCR, and presents candidates for review.
+7. **Triage Gmail:** local background worker pages through the mailbox; local model marks each message important or unimportant; only a concise summary from important mail enters the review inbox.
 
 ## Assumptions and scope
 
@@ -62,3 +66,5 @@ This is a single-user local MVP. Google Calendar/Gmail are optional authorized i
 - Repeated acceptance: suggestion is consumed once; second request returns 404.
 - Concurrent writes: SQLite transactions serialize write commits; conflicting edits need optimistic versioning if multi-device editing is added.
 - Malformed `.ics`: rejected with 400; valid calendar files without VEVENT records return no candidates.
+- Ollama unavailable: email scan remains paused and resumable; no message is marked processed until a local model result is produced.
+- Gmail pagination/network failure: persist the current page checkpoint, expose scan error, and resume from that page.

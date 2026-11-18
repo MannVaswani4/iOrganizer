@@ -18,6 +18,9 @@ from pydantic import BaseModel, Field
 
 from .agents import AgentPipeline, RuleBasedExtractor
 from .domain import Candidate, ItemKind, ItemStatus, OrganizerItem
+from .email_agent import EmailAgentError, LocalEmailTriageAgent
+from .email_store import GmailTriageStore
+from .gmail_scanner import GmailMailboxScanner
 from .persistence import SqlAlchemyItemRepository, make_database
 from .photo_ocr import PhotoOcrError, SUPPORTED_PHOTO_EXTENSIONS, extract_text
 from .services import OrganizerService, accept_candidate
@@ -72,17 +75,22 @@ class SuggestionResponse(BaseModel):
 sessions, _engine = make_database()
 service = OrganizerService(SqlAlchemyItemRepository(sessions), AgentPipeline(RuleBasedExtractor()))
 pipeline = AgentPipeline(RuleBasedExtractor())
+gmail_store = GmailTriageStore(sessions)
+email_agent = LocalEmailTriageAgent()
+gmail_scanner = GmailMailboxScanner(gmail_store, email_agent)
 oauth_states: dict[str, tuple[float, str]] = {}
 photo_sessions: dict[str, tuple[str, float]] = {}
 last_google_sync: str | None = None
 google_sync_error: str | None = None
-google_sync_lock = threading.Lock()
+suggestion_lock = threading.Lock()
+gmail_scan_lock = threading.Lock()
+gmail_scan_running = False
+gmail_scan_error: str | None = None
 
 
-def collect_google_suggestions() -> int:
-    global next_suggestion_id, last_google_sync, google_sync_error
-    with google_sync_lock:
-        candidates = google.sync_google_sources(pipeline)
+def add_candidate_suggestions(candidates: list[Candidate]) -> int:
+    global next_suggestion_id
+    with suggestion_lock:
         known_refs = {item.source_ref for item in service.list_items() if item.source_ref}
         known_refs.update(candidate.source_ref for candidate in suggestions.values() if candidate.source_ref)
         added = 0
@@ -95,9 +103,51 @@ def collect_google_suggestions() -> int:
             if candidate.source_ref:
                 known_refs.add(candidate.source_ref)
             added += 1
-        last_google_sync = datetime.now().astimezone().isoformat()
-        google_sync_error = None
         return added
+
+
+def collect_google_suggestions() -> int:
+    global last_google_sync, google_sync_error
+    candidates = google.sync_google_sources(pipeline)
+    added = add_candidate_suggestions(candidates)
+    last_google_sync = datetime.now().astimezone().isoformat()
+    google_sync_error = None
+    return added
+
+
+def run_gmail_scan() -> None:
+    global gmail_scan_running, gmail_scan_error
+    try:
+        gmail_scanner.scan(add_candidate_suggestions)
+        gmail_scan_error = None
+    except Exception as exc:
+        gmail_scan_error = str(exc)[:500]
+    finally:
+        gmail_scan_running = False
+
+
+def start_gmail_scan() -> bool:
+    global gmail_scan_running, gmail_scan_error
+    model_status = email_agent.status()
+    if not model_status["model_ready"]:
+        raise EmailAgentError(model_status["detail"])
+    with gmail_scan_lock:
+        if gmail_scan_running:
+            return False
+        state = gmail_store.scan_state()
+        gmail_store.save_scan_state(
+            page_token=state["page_token"], initial_complete=state["initial_complete"],
+            scan_kind=state["scan_kind"], messages_seen=state["messages_seen"],
+            messages_classified=state["messages_classified"], important_found=state["important_found"],
+        )
+        gmail_scan_running = True
+        gmail_scan_error = None
+        threading.Thread(target=run_gmail_scan, name="iorganizer-gmail-scan", daemon=True).start()
+        return True
+
+
+def restore_gmail_suggestions() -> None:
+    add_candidate_suggestions(gmail_store.pending_candidates())
 
 
 async def auto_google_sync() -> None:
@@ -105,8 +155,11 @@ async def auto_google_sync() -> None:
     while True:
         try:
             status = google.connection_status()
-            if status.get("connected") and (status.get("calendar") or status.get("gmail")):
-                await run_in_threadpool(collect_google_suggestions)
+            if status.get("connected"):
+                if status.get("calendar"):
+                    await run_in_threadpool(collect_google_suggestions)
+                if status.get("gmail") and email_agent.status()["model_ready"]:
+                    start_gmail_scan()
         except Exception as exc:
             google_sync_error = str(exc)[:300]
         await asyncio.sleep(1800)
@@ -114,6 +167,7 @@ async def auto_google_sync() -> None:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    await run_in_threadpool(restore_gmail_suggestions)
     task = asyncio.create_task(auto_google_sync())
     try:
         yield
@@ -146,6 +200,26 @@ def health() -> dict[str, str]:
 def google_status() -> dict:
     return {**google.connection_status(), "last_sync": last_google_sync,
             "sync_error": google_sync_error, "sync_interval_minutes": 30}
+
+
+@app.get("/api/v1/google/gmail/scan/status")
+def gmail_scan_status() -> dict:
+    state = gmail_store.scan_state()
+    local_model = email_agent.status()
+    return {**state, "running": gmail_scan_running,
+            "error": gmail_scan_error or state.get("last_error"), "local_model": local_model}
+
+
+@app.post("/api/v1/google/gmail/scan")
+def gmail_scan_start() -> dict:
+    connection = google.connection_status()
+    if not connection.get("gmail"):
+        raise HTTPException(401, "Connect Google and grant Gmail read access first.")
+    try:
+        started = start_gmail_scan()
+    except EmailAgentError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    return {"started": started, **gmail_scan_status()}
 
 
 @app.get("/api/v1/google/authorize")
@@ -271,8 +345,12 @@ def list_suggestions() -> list[SuggestionResponse]:
 
 @app.delete("/api/v1/suggestions/{suggestion_id}", status_code=204)
 def dismiss_suggestion(suggestion_id: int) -> None:
-    if suggestions.pop(suggestion_id, None) is None:
+    with suggestion_lock:
+        candidate = suggestions.pop(suggestion_id, None)
+    if candidate is None:
         raise HTTPException(404, "Suggestion not found or already reviewed")
+    if candidate.source_ref and candidate.source_ref.startswith("gmail:"):
+        gmail_store.set_review_state(candidate.source_ref.removeprefix("gmail:"), "dismissed")
 
 
 @app.post("/api/v1/items", response_model=ItemResponse, status_code=201)
@@ -357,7 +435,11 @@ async def import_file(file: UploadFile = File(...)) -> list[SuggestionResponse]:
 
 @app.post("/api/v1/suggestions/{suggestion_id}/accept", response_model=ItemResponse, status_code=201)
 def accept_suggestion(suggestion_id: int) -> ItemResponse:
-    candidate = suggestions.pop(suggestion_id, None)
+    with suggestion_lock:
+        candidate = suggestions.pop(suggestion_id, None)
     if candidate is None:
         raise HTTPException(404, "Suggestion not found or already reviewed")
-    return ItemResponse.from_item(accept_candidate(service, candidate))
+    item = accept_candidate(service, candidate)
+    if candidate.source_ref and candidate.source_ref.startswith("gmail:"):
+        gmail_store.set_review_state(candidate.source_ref.removeprefix("gmail:"), "accepted")
+    return ItemResponse.from_item(item)

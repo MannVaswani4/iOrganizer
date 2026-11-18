@@ -4,7 +4,7 @@ import os
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import DateTime, String, Text, create_engine, select
+from sqlalchemy import Boolean, DateTime, Integer, String, Text, create_engine, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 from .domain import ItemKind, ItemStatus, OrganizerItem
@@ -28,6 +28,31 @@ class ItemRow(Base):
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="open")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class GmailMessageTriageRow(Base):
+    __tablename__ = "gmail_message_triage"
+    message_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    is_important: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    title: Mapped[str | None] = mapped_column(String(300))
+    summary: Mapped[str | None] = mapped_column(Text)
+    category: Mapped[str | None] = mapped_column(String(80))
+    received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    processed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    review_state: Mapped[str] = mapped_column(String(20), nullable=False, default="pending", index=True)
+
+
+class GmailScanStateRow(Base):
+    __tablename__ = "gmail_scan_state"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    page_token: Mapped[str | None] = mapped_column(Text)
+    initial_complete: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    scan_kind: Mapped[str] = mapped_column(String(20), nullable=False, default="initial")
+    messages_seen: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    messages_classified: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    important_found: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_scan_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(String(500))
 
 
 class SqlAlchemyItemRepository(ItemRepository):

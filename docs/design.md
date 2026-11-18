@@ -4,7 +4,7 @@
 
 `FastAPI router → OrganizerService → ItemRepository interface → SQLAlchemy adapter → SQLite`
 
-Import processing uses `router → AgentPipeline → ContentExtractor strategy → Candidate`; candidates become persistent items only after explicit acceptance. Authorized Google reads use `GoogleSource` adapters for Calendar and Gmail, with OAuth credentials isolated in Keychain. Google Photos Picker is a separate user selection adapter; selected image bytes pass to local OCR. Domain objects do not depend on FastAPI or SQLAlchemy.
+File imports use `router → AgentPipeline → ContentExtractor strategy → Candidate`; candidates become persistent items only after explicit acceptance. Calendar reads use the `GoogleSource` adapter. Gmail backfill uses `GmailMessagesConnector → GmailMailboxScanner → LocalEmailTriageAgent → GmailTriageStore`; its Ollama model is constrained to loopback, and only important summaries become review suggestions. Google Photos Picker is a separate user-selection adapter; selected image bytes pass to local OCR. OAuth credentials remain in Keychain. Domain objects do not depend on FastAPI or SQLAlchemy.
 
 ## Main classes and responsibilities
 
@@ -21,7 +21,11 @@ Import processing uses `router → AgentPipeline → ContentExtractor strategy �
 | `photo_ocr.extract_text` | Normalizes an explicitly uploaded image and invokes local Tesseract OCR; discards temporary image files |
 | `AgentPipeline` | Orchestrates the selected extractor |
 | `GoogleSource` | Read-only Google connector interface returning `Candidate` proposals |
-| `CalendarConnector`, `GmailConnector` | Fetch and map API records into candidates |
+| `CalendarConnector` | Fetch and map Calendar events into candidates |
+| `GmailMessagesConnector` | List and fetch Gmail messages through the read-only API |
+| `GmailMailboxScanner` | Paginate the mailbox, resume from SQLite checkpoints, and forward important candidates |
+| `LocalEmailTriageAgent` | Use a local Ollama model to classify importance and produce a short summary |
+| `GmailTriageStore` | Persist processed IDs, scan progress, important summaries, and review state; never stores unimportant bodies |
 | `google_integrations` OAuth functions | Authorize, refresh and store credentials in Keychain; coordinate connectors |
 | Google Photos Picker functions | Create selection sessions, retrieve selected image bytes and invoke local OCR |
 | `ItemCreate`, `ItemResponse` | API input/output contracts |

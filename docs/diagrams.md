@@ -184,3 +184,38 @@ sequenceDiagram
     API-->>UI: Reviewable candidates
     User->>UI: Accept chosen candidates
 ```
+
+## Full Gmail triage
+
+```mermaid
+sequenceDiagram
+    participant Scheduler as App scheduler
+    participant Scanner as GmailMailboxScanner
+    participant Gmail as Gmail API
+    participant Agent as LocalEmailTriageAgent
+    participant Ollama as Loopback Ollama
+    participant Store as GmailTriageStore / SQLite
+    participant Review as Suggestion inbox
+    Scheduler->>Scanner: Start or resume scan
+    loop Each Gmail page (up to 500 IDs)
+        Scanner->>Gmail: messages.list(pageToken)
+        Gmail-->>Scanner: Message IDs + nextPageToken
+        Scanner->>Store: Skip IDs already classified
+        loop Each new message
+            Scanner->>Gmail: messages.get(format=full)
+            Gmail-->>Scanner: Headers and text body
+            Scanner->>Agent: Subject, sender, date, body
+            Agent->>Ollama: Local JSON importance + summary request
+            Ollama-->>Agent: important/category/summary
+            alt Important
+                Agent->>Store: Save summary and pending review state
+                Agent->>Review: Add summarized Candidate
+            else Not important
+                Agent->>Store: Save processed ID/decision only
+            end
+        end
+        Scanner->>Store: Save page checkpoint and progress
+    end
+    Review-->>Scanner: User accepts or dismisses
+    Scanner->>Store: Persist review state
+```
