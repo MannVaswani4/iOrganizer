@@ -44,6 +44,10 @@ classDiagram
     class RuleBasedExtractor
     class AgentPipeline {
       +process(text, source) Candidate[]
+      +process_photo_text(text, source) Candidate[]
+    }
+    class PhotoOCR {
+      +extract_text(image_bytes, filename) string
     }
     OrganizerService --> ItemRepository : depends on
     OrganizerService --> AgentPipeline : uses
@@ -51,6 +55,7 @@ classDiagram
     RuleBasedExtractor ..|> ContentExtractor : implements
     AgentPipeline --> ContentExtractor : strategy
     AgentPipeline ..> Candidate : creates
+    PhotoOCR ..> AgentPipeline : supplies local OCR text
     ItemRepository o--> OrganizerItem : stores 0..*
     OrganizerService ..> OrganizerItem : creates
 ```
@@ -102,4 +107,29 @@ flowchart TD
     F --> M[End]
     J --> M
     L --> M
+```
+
+
+## Sequence: selected iPhone photo to reviewable note
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant Browser as iOrganizer UI
+    participant API as Import API
+    participant OCR as Local Tesseract OCR
+    participant Pipeline as AgentPipeline
+    participant UserReview as Suggestion review
+    User->>Browser: Select photo on iPhone and AirDrop to Mac
+    User->>Browser: Choose the photo file
+    Browser->>API: POST /api/v1/imports (multipart image)
+    API->>API: Check extension and 10 MB limit
+    API->>OCR: Decode temporary image and recognize text
+    OCR-->>API: OCR text; temporary image removed
+    API->>Pipeline: process_photo_text(text, filename)
+    Pipeline-->>API: Task candidates or one note candidate
+    API-->>Browser: Suggestions with photo provenance
+    User->>UserReview: Review and accept or dismiss
+    UserReview->>API: POST /api/v1/suggestions/{id}/accept
+    API-->>Browser: Saved item response
 ```

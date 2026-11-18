@@ -7,11 +7,13 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
 from .agents import AgentPipeline, RuleBasedExtractor
 from .domain import Candidate, ItemKind, ItemStatus, OrganizerItem
 from .persistence import SqlAlchemyItemRepository, make_database
+from .photo_ocr import PhotoOcrError, SUPPORTED_PHOTO_EXTENSIONS, extract_text
 from .services import OrganizerService, accept_candidate
 
 
@@ -120,22 +122,33 @@ def delete_item(item_id: UUID) -> None:
 
 
 @app.post("/api/v1/imports", response_model=list[SuggestionResponse], status_code=201)
-async def import_text(file: UploadFile = File(...)) -> list[SuggestionResponse]:
+async def import_file(file: UploadFile = File(...)) -> list[SuggestionResponse]:
     global next_suggestion_id
     if not file.filename or len(file.filename) > 255:
         raise HTTPException(400, "A valid filename is required")
-    if not (file.filename.endswith(".txt") or file.filename.endswith(".ics")):
-        raise HTTPException(415, "Only .txt and .ics imports are supported")
-    raw = await file.read(1_000_001)
-    if len(raw) > 1_000_000:
-        raise HTTPException(413, "Import must be at most 1 MB")
+    suffix = Path(file.filename).suffix.lower()
+    is_photo = suffix in SUPPORTED_PHOTO_EXTENSIONS
+    if not (is_photo or suffix in {".txt", ".ics"}):
+        raise HTTPException(415, "Use a .txt chat export, .ics calendar, or supported photo file")
+    max_bytes = 10_000_000 if is_photo else 1_000_000
+    raw = await file.read(max_bytes + 1)
+    await file.close()
+    if len(raw) > max_bytes:
+        raise HTTPException(413, f"File must be at most {max_bytes // 1_000_000} MB")
     try:
-        if file.filename.endswith(".txt"):
+        if suffix == ".txt":
             candidates = service.suggest(raw.decode("utf-8-sig"), file.filename)
-        else:
+        elif suffix == ".ics":
             candidates = service.suggest_calendar(raw, file.filename)
+        else:
+            ocr_text = await run_in_threadpool(extract_text, raw, file.filename)
+            candidates = service.suggest_photo_text(ocr_text, file.filename)
     except UnicodeDecodeError as exc:
-        raise HTTPException(400, "Import must be UTF-8 text") from exc
+        raise HTTPException(400, "Chat export must be UTF-8 text") from exc
+    except PhotoOcrError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
     except (ValueError, TypeError) as exc:
         raise HTTPException(400, "Invalid iCalendar file") from exc
     output = []
@@ -147,7 +160,6 @@ async def import_text(file: UploadFile = File(...)) -> list[SuggestionResponse]:
                                          kind=candidate.kind, category=candidate.category,
                                          source_ref=candidate.source_ref))
     return output
-
 
 @app.post("/api/v1/suggestions/{suggestion_id}/accept", response_model=ItemResponse, status_code=201)
 def accept_suggestion(suggestion_id: int) -> ItemResponse:

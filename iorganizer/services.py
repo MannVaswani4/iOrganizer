@@ -47,6 +47,9 @@ class OrganizerService:
     def suggest_calendar(self, content: bytes, source: str) -> list[Candidate]:
         return self._pipeline.process_calendar(content, source)
 
+    def suggest_photo_text(self, text: str, source: str) -> list[Candidate]:
+        return self._pipeline.process_photo_text(text, source)
+
 
 def accept_candidate(service: OrganizerService, candidate: Candidate) -> OrganizerItem:
     return service.create_item(candidate.title, candidate.kind, candidate.body,

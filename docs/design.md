@@ -18,6 +18,7 @@ Import processing uses `router → AgentPipeline → ContentExtractor strategy �
 | `SqlAlchemyItemRepository` | SQLite persistence adapter and row/domain mapping |
 | `ContentExtractor` | Abstraction for extraction strategies |
 | `RuleBasedExtractor` | Offline, explainable baseline extraction agent |
+| `photo_ocr.extract_text` | Normalizes an explicitly uploaded image and invokes local Tesseract OCR; discards temporary image files |
 | `AgentPipeline` | Orchestrates the selected extractor |
 | `ItemCreate`, `ItemResponse` | API input/output contracts |
 
@@ -39,7 +40,7 @@ Import processing uses `router → AgentPipeline → ContentExtractor strategy �
 ## Patterns and rationale
 
 - **Repository (structural):** isolates domain/service from persistence.
-- **Strategy (behavioral):** extraction algorithm can switch from rules to local model while preserving pipeline contract.
+- **Strategy (behavioral):** extraction algorithm can switch from rules to local model while preserving pipeline contract. OCR is a local adapter invoked only for user-selected images.
 - **Factory / composition root (creational):** module-level setup constructs engine, repository, extractor, pipeline, and service in one place; production can move this to app lifespan/DI.
 - **DTO / Data Mapper (structural):** Pydantic request/response types and SQLAlchemy mapping keep transport/storage types out of the domain.
 - **Observer:** intentionally deferred; no asynchronous notification need exists in the MVP. Add only when reminders/background jobs are introduced.
@@ -57,4 +58,4 @@ Import processing uses `router → AgentPipeline → ContentExtractor strategy �
 
 ## Error and concurrency policy
 
-HTTP validation failures return 4xx responses. Missing resources return 404. Import size is bounded before full read. Database operations use short SQLAlchemy transactions. The first MVP is single-user; if multiple editors are introduced, add a version column and compare-and-swap update to prevent lost updates. Suggestions are currently in process memory and are cleared on restart; persist import batches/suggestions before a multi-session deployment.
+HTTP validation failures return 4xx responses. Missing resources return 404. Import size is bounded before full read (1 MB for text/calendar; 10 MB for photos). Photo OCR runs in a worker thread, limits decoded image dimensions, and removes temporary files after processing. Database operations use short SQLAlchemy transactions. The first MVP is single-user; if multiple editors are introduced, add a version column and compare-and-swap update to prevent lost updates. Suggestions are currently in process memory and are cleared on restart; persist import batches/suggestions before a multi-session deployment.

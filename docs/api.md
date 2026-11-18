@@ -1,6 +1,6 @@
 # API contract (v1)
 
-Base URL: `http://127.0.0.1:8000/api/v1`. JSON UTF-8 unless noted. Interactive OpenAPI: `/docs`.
+Base URL: `http://127.0.0.1:8765/api/v1`. JSON UTF-8 unless noted. Interactive OpenAPI: `/docs`.
 
 ## Create item
 
@@ -28,7 +28,7 @@ Base URL: `http://127.0.0.1:8000/api/v1`. JSON UTF-8 unless noted. Interactive O
 
 ## Import a file
 
-`POST /imports` with `multipart/form-data`, field `file`; `.txt` and `.ics`, maximum 1 MB. Text imports must be UTF-8. `201` response is an array of suggestions: `[{"id":1,"title":"...","body":"...","kind":"task","category":"personal","source_ref":"export.txt:line:2"}]`. Calendar VEVENTs become `event` suggestions with start time and UID provenance. Unsupported format: 415; too large: 413; invalid encoding/calendar: 400.
+`POST /imports` with `multipart/form-data`, field `file`; `.txt` and `.ics` up to 1 MB, or user-selected JPG/JPEG/PNG/WebP/BMP/TIFF/HEIC/HEIF photos up to 10 MB. Text imports must be UTF-8. Photos are OCR-processed locally with Tesseract; the original image is temporary and is not retained. `201` response is an array of suggestions: `[{"id":1,"title":"...","body":"...","kind":"task","category":"personal","source_ref":"export.txt:line:2"}]`. Calendar VEVENTs become `event` suggestions with start time and UID provenance. Unsupported format: 415; too large: 413; invalid encoding, image or calendar: 400; OCR engine missing: 503.
 
 ## Accept suggestion
 

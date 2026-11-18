@@ -12,7 +12,7 @@ Personal commitments and useful information are scattered across calendars, conv
 
 - Create, view, update, search, and archive organizer items.
 - Add a quick note or task through the API.
-- Import `.ics` calendar files and plain-text chat exports through explicit upload endpoints.
+- Import `.ics` calendar files, plain-text chat exports, and user-selected photos through explicit upload endpoints. Photo text is extracted locally with Tesseract OCR; source images are temporary and are not saved.
 - Run a deterministic, explainable extraction pipeline; review suggestions before accepting them.
 - Store data in local SQLite. Keep source, provenance, and processing status with every imported item.
 - Export/backup can be added without changing the source adapter interfaces.
@@ -21,7 +21,8 @@ The initial release does not connect to phone operating-system internals or scra
 
 ## Free stack
 
-- Python 3.11+, FastAPI, Pydantic, SQLAlchemy, SQLite
+- Python 3.11+, FastAPI, Pydantic, SQLAlchemy, SQLite, Pillow, and free local Tesseract OCR
+- macOS HEIC conversion uses the built-in `sips` tool; on iPhone, AirDrop a selected photo to the Mac for the local demo
 - pytest for tests; Mermaid for diagrams
 - Optional local model: Ollama (no hosted model required). The MVP agent strategy is rule-based and works offline without a model.
 - No paid APIs, subscriptions, or proprietary cloud services are required.
@@ -35,7 +36,7 @@ pip install -r requirements.txt
 uvicorn iorganizer.main:app --reload --port 8765
 ```
 
-Open `http://127.0.0.1:8765/` for the web app or `http://127.0.0.1:8765/docs` for the interactive API. The SQLite database is created at `./data/iorganizer.db` by default. Keep the app bound to localhost; imported calendar/chat content can be sensitive.
+On macOS, install Tesseract if needed with `brew install tesseract`. Open `http://127.0.0.1:8765/` for the web app or `http://127.0.0.1:8765/docs` for the interactive API. The SQLite database is created at `./data/iorganizer.db` by default. Keep the app bound to localhost; imported calendar/chat content can be sensitive.
 
 ## Repository guide
 
@@ -52,7 +53,7 @@ Open `http://127.0.0.1:8765/` for the web app or `http://127.0.0.1:8765/docs` fo
 1. Start the app and create a task with `POST /api/v1/items`.
 2. Upload a small `.ics` file or chat text export to `POST /api/v1/imports`.
 3. Inspect the proposed items in the import response.
-4. Accept a suggestion with `POST /api/v1/suggestions/{id}/accept`.
+4. Review a photo OCR note or extracted task suggestion, then accept it with `POST /api/v1/suggestions/{id}/accept`.
 5. Search/filter the unified inbox with `GET /api/v1/items`.
 
 See the docs for requirements traceability and design justification.

@@ -21,8 +21,8 @@ Collect user-selected information from scattered sources into one private, searc
 | FR-2 | List and search saved items by title/body | `GET /api/v1/items?q=...` |
 | FR-3 | Retrieve and delete an item by ID | Item GET and DELETE endpoints |
 | FR-3a | Update item fields and lifecycle status | `PATCH /api/v1/items/{id}` |
-| FR-4 | Import a user-selected text or iCalendar export | `POST /api/v1/imports` |
-| FR-5 | Extract task-like lines into reviewable suggestions | RuleBasedExtractor and import response |
+| FR-4 | Import a user-selected text, iCalendar, or photo file | `POST /api/v1/imports` |
+| FR-5 | Extract task-like lines and OCR text into reviewable suggestions | RuleBasedExtractor, local Tesseract OCR, and import response |
 | FR-6 | Accept a suggestion into the inbox | `POST /api/v1/suggestions/{id}/accept` |
 | FR-7 | Store accepted items in local SQLite | SQLAlchemy repository |
 | FR-8 | Preserve source and provenance for imported suggestions | `source_ref` in suggestion response; `source=import` on accepted item |
@@ -46,13 +46,13 @@ Collect user-selected information from scattered sources into one private, searc
 
 ## Assumptions and scope
 
-This is a single-user local MVP. Direct phone/calendar/chat integrations are future adapters. They must use official APIs or user-exported data with explicit authorization; scraping or silently scanning personal accounts is out of scope. The initial text extractor recognizes task markers and returns explainable rules-based candidates. The iCalendar adapter converts VEVENT records into event suggestions.
+This is a single-user local MVP. Direct phone/calendar/chat integrations are future adapters. They must use official APIs or user-exported data with explicit authorization; scraping or silently scanning personal accounts is out of scope. The initial text extractor recognizes task markers and returns explainable rules-based candidates. The iCalendar adapter converts VEVENT records into event suggestions. Explicitly selected photos are OCR-processed locally; AirDrop is the current iPhone-to-Mac transfer path.
 
 ## Edge cases
 
 - Empty or whitespace-only titles: rejected.
 - Unknown item/suggestion ID: 404.
-- Unsupported extension: 415; oversized upload: 413; invalid UTF-8: 400.
+- Unsupported extension: 415; oversized upload: 413; invalid UTF-8 or unreadable image: 400.
 - Empty/non-actionable import: valid empty suggestion list.
 - Repeated acceptance: suggestion is consumed once; second request returns 404.
 - Concurrent writes: SQLite transactions serialize write commits; conflicting edits need optimistic versioning if multi-device editing is added.

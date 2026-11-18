@@ -45,6 +45,18 @@ class AgentPipeline:
     def process(self, text: str, source: str) -> list[Candidate]:
         return self._extractor.extract(text, source)
 
+    def process_photo_text(self, text: str, source: str) -> list[Candidate]:
+        """Turn OCR output into task candidates or a reviewable searchable note."""
+        clean = text.strip()
+        if not clean:
+            return []
+        tasks = self._extractor.extract(clean, source)
+        if tasks:
+            return tasks
+        first_line = next((line.strip() for line in clean.splitlines() if line.strip()), "Photo note")
+        return [Candidate(title=first_line[:120], body=clean[:20_000], kind=ItemKind.NOTE,
+                          category="photo", source_ref=f"{source}:ocr")]
+
     def process_calendar(self, content: bytes, source: str) -> list[Candidate]:
         calendar = Calendar.from_ical(content)
         candidates: list[Candidate] = []
