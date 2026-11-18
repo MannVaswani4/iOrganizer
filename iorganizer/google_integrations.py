@@ -81,12 +81,14 @@ def make_oauth_flow(state: str | None = None) -> Flow:
         raise GoogleIntegrationError("Could not read the Google OAuth client JSON file.") from exc
 
 
-def authorization_url() -> tuple[str, str]:
+def authorization_url() -> tuple[str, str, str]:
     flow = make_oauth_flow()
     url, state = flow.authorization_url(
         access_type="offline", include_granted_scopes="true", prompt="consent"
     )
-    return url, state
+    if not flow.code_verifier:
+        raise GoogleIntegrationError("Could not initialize secure Google sign-in.")
+    return url, state, flow.code_verifier
 
 
 def save_credentials(credentials: Credentials) -> None:

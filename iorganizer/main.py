@@ -69,7 +69,7 @@ class SuggestionResponse(BaseModel):
 sessions, _engine = make_database()
 service = OrganizerService(SqlAlchemyItemRepository(sessions), AgentPipeline(RuleBasedExtractor()))
 pipeline = AgentPipeline(RuleBasedExtractor())
-oauth_states: dict[str, float] = {}
+oauth_states: dict[str, tuple[float, str]] = {}
 photo_sessions: dict[str, tuple[str, float]] = {}
 last_google_sync: str | None = None
 google_sync_error: str | None = None
@@ -148,23 +148,25 @@ def google_status() -> dict:
 @app.get("/api/v1/google/authorize")
 def google_authorize():
     try:
-        url, state = google.authorization_url()
+        url, state, code_verifier = google.authorization_url()
     except google.GoogleIntegrationError as exc:
         raise HTTPException(503, str(exc)) from exc
-    oauth_states[state] = time.time() + 600
+    oauth_states[state] = (time.time() + 600, code_verifier)
     return RedirectResponse(url)
 
 
 @app.get("/oauth/google/callback", include_in_schema=False)
 async def google_callback(request: Request):
     state = request.query_params.get("state", "")
-    expires = oauth_states.pop(state, 0)
+    oauth_state = oauth_states.pop(state, None)
+    expires, code_verifier = oauth_state if oauth_state else (0, "")
     if not state or expires < time.time():
         raise HTTPException(400, "Google sign-in expired. Return to iOrganizer and connect again.")
     if request.query_params.get("error"):
         return HTMLResponse("<h2>Google connection was not completed.</h2><p>Return to iOrganizer and try again.</p>", status_code=400)
     try:
         flow = google.make_oauth_flow(state=state)
+        flow.code_verifier = code_verifier
         flow.fetch_token(authorization_response=str(request.url))
         google.save_credentials(flow.credentials)
         await run_in_threadpool(collect_google_suggestions)
