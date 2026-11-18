@@ -45,6 +45,20 @@ class AgentPipeline:
     def process(self, text: str, source: str) -> list[Candidate]:
         return self._extractor.extract(text, source)
 
+    def process_email(self, subject: str, sender: str, body: str, source: str) -> list[Candidate]:
+        """Extract task markers from a recent email, or propose a searchable email note."""
+        context = f"Subject: {subject}\nFrom: {sender}\n\n{body}".strip()
+        tasks = self._extractor.extract(context, source)
+        if tasks:
+            return [Candidate(title=item.title, body=f"Email: {subject}\nFrom: {sender}\n\n{item.body}"[:20_000],
+                              kind=ItemKind.TASK, category="email", due_at=item.due_at,
+                              source_ref=source) for item in tasks]
+        if not body.strip() and not subject.strip():
+            return []
+        note_title = subject.strip() or "Email note"
+        return [Candidate(title=note_title[:200], body=f"From: {sender}\n\n{body}"[:20_000],
+                          kind=ItemKind.NOTE, category="email", source_ref=source)]
+
     def process_photo_text(self, text: str, source: str) -> list[Candidate]:
         """Turn OCR output into task candidates or a reviewable searchable note."""
         clean = text.strip()

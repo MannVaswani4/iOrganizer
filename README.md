@@ -6,18 +6,19 @@ This repository is the capstone project for **System Design and Agentic AI**. It
 
 ## Problem and solution
 
-Personal commitments and useful information are scattered across calendars, conversations, and notes. iOrganizer brings user-authorized sources into one searchable inbox. Small agents extract candidate tasks/events, suggest categories and due dates, and let the user review results before saving them. The user remains in control: there is no background scanning of the device, and nothing is sent to a paid hosted AI service.
+Personal commitments and useful information are scattered across calendars, conversations, and notes. iOrganizer brings user-authorized sources into one searchable inbox. Small agents extract candidate tasks/events, suggest categories and due dates, and let the user review results before saving them. The user remains in control: there is no background scanning of the device; Google sync only accesses the APIs the user authorized, and nothing is sent to a paid hosted AI service.
 
 ## MVP scope
 
 - Create, view, update, search, and archive organizer items.
 - Add a quick note or task through the API.
 - Import `.ics` calendar files, plain-text chat exports, and user-selected photos through explicit upload endpoints. Photo text is extracted locally with Tesseract OCR; source images are temporary and are not saved.
+- Optionally connect Google Calendar, Gmail, and Google Photos Picker with read-only OAuth. Calendar/Gmail suggestions sync while the local server is running; Photos only processes pictures selected in Google's picker.
 - Run a deterministic, explainable extraction pipeline; review suggestions before accepting them.
 - Store data in local SQLite. Keep source, provenance, and processing status with every imported item.
 - Export/backup can be added without changing the source adapter interfaces.
 
-The initial release does not connect to phone operating-system internals or scrape private apps. Direct integrations require supported public APIs, user-granted authorization, and platform-specific setup. Chat export import is the free, demonstrable path for the capstone.
+The app does not connect to phone-operating-system internals or scrape private apps. WhatsApp remains a user-exported `.txt` import. Google integration requires enabling the APIs, adding the local redirect URI, and consenting in OAuth; token data is held in macOS Keychain. Keep `secrets/client_secret.json` local and never commit it.
 
 ## Free stack
 
@@ -26,6 +27,7 @@ The initial release does not connect to phone operating-system internals or scra
 - pytest for tests; Mermaid for diagrams
 - Optional local model: Ollama (no hosted model required). The MVP agent strategy is rule-based and works offline without a model.
 - No paid APIs, subscriptions, or proprietary cloud services are required.
+- Google API use is subject to Google's quotas and OAuth consent/testing limits; no paid AI or hosted extraction service is used.
 
 ## Run locally
 
@@ -37,6 +39,8 @@ uvicorn iorganizer.main:app --reload --port 8765
 ```
 
 On macOS, install Tesseract if needed with `brew install tesseract`. Open `http://127.0.0.1:8765/` for the web app or `http://127.0.0.1:8765/docs` for the interactive API. The SQLite database is created at `./data/iorganizer.db` by default. Keep the app bound to localhost; imported calendar/chat content can be sensitive.
+
+To enable Google, place the downloaded **Web application** OAuth JSON at `secrets/client_secret.json`, make sure its authorized redirect URI is exactly `http://127.0.0.1:8765/oauth/google/callback`, enable Calendar API, Gmail API, and Photos Picker API in the Cloud project, and add your Google account as an OAuth test user. Restart the server and click **Connect Google**. The first Calendar/Gmail sync runs after consent; later syncs run every 30 minutes while this server is running. In OAuth Testing mode, Google may expire refresh tokens after seven days, requiring reconnection. Google Photos uses a separate Picker session and imports up to 10 selected images per session for local OCR.
 
 ## Repository guide
 

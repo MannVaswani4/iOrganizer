@@ -26,10 +26,13 @@ Collect user-selected information from scattered sources into one private, searc
 | FR-6 | Accept a suggestion into the inbox | `POST /api/v1/suggestions/{id}/accept` |
 | FR-7 | Store accepted items in local SQLite | SQLAlchemy repository |
 | FR-8 | Preserve source and provenance for imported suggestions | `source_ref` in suggestion response; `source=import` on accepted item |
+| FR-9 | Connect Google with read-only OAuth and collect Calendar events / relevant Gmail messages as suggestions | `/api/v1/google/authorize`, `/api/v1/google/sync` |
+| FR-10 | Import only Google Photos explicitly selected through Picker; OCR locally | `/api/v1/google/photos/sessions` |
+| FR-11 | Deduplicate Google records and refresh Calendar/Gmail every 30 minutes while local server is running | Source IDs, `/api/v1/google/status` |
 
 ## Non-functional requirements
 
-- **Privacy:** local storage, explicit file upload, no network model calls, no background device scanning.
+- **Privacy:** local storage; read-only Google scopes; explicit Photos selection; no background device scanning or network model calls; review before saving.
 - **Cost:** every required runtime component is free/open-source; optional AI runs locally.
 - **Maintainability:** depend on repository and extractor abstractions, not concrete implementations.
 - **Usability:** OpenAPI docs at `/docs`; imports return suggestions for review.
@@ -43,10 +46,12 @@ Collect user-selected information from scattered sources into one private, searc
 2. **Collect from export:** user uploads a file; import boundary checks size/type/encoding; extractor proposes candidates; user reviews and accepts selected candidate(s).
 3. **Find information:** user searches; service delegates to repository; matching items return newest first.
 4. **Remove item:** user deletes by identifier; repository reports whether an item existed.
+5. **Connect Google:** user consents to read-only scopes; OAuth tokens are kept in macOS Keychain; Calendar/Gmail records are fetched locally, deduplicated, and presented for review.
+6. **Select photos:** user chooses images in Google Photos Picker; the app downloads selected images temporarily, extracts text with local OCR, and presents candidates for review.
 
 ## Assumptions and scope
 
-This is a single-user local MVP. Direct phone/calendar/chat integrations are future adapters. They must use official APIs or user-exported data with explicit authorization; scraping or silently scanning personal accounts is out of scope. The initial text extractor recognizes task markers and returns explainable rules-based candidates. The iCalendar adapter converts VEVENT records into event suggestions. Explicitly selected photos are OCR-processed locally; AirDrop is the current iPhone-to-Mac transfer path.
+This is a single-user local MVP. Google Calendar/Gmail are optional authorized integrations; Google Photos is limited to user-selected Picker items. WhatsApp is imported from an explicitly exported `.txt` file; it is not scraped. The initial text extractor recognizes task markers and returns explainable rules-based candidates. AirDrop remains an alternative path for iPhone photos.
 
 ## Edge cases
 

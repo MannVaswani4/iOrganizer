@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import asyncio
+import secrets
+import threading
+import time
+from contextlib import asynccontextmanager, suppress
 from datetime import datetime
 from uuid import UUID
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, File, HTTPException, UploadFile, Request
+from fastapi.responses import FileResponse, RedirectResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 from fastapi.concurrency import run_in_threadpool
@@ -15,6 +20,7 @@ from .domain import Candidate, ItemKind, ItemStatus, OrganizerItem
 from .persistence import SqlAlchemyItemRepository, make_database
 from .photo_ocr import PhotoOcrError, SUPPORTED_PHOTO_EXTENSIONS, extract_text
 from .services import OrganizerService, accept_candidate
+from . import google_integrations as google
 
 
 class ItemCreate(BaseModel):
@@ -62,7 +68,59 @@ class SuggestionResponse(BaseModel):
 
 sessions, _engine = make_database()
 service = OrganizerService(SqlAlchemyItemRepository(sessions), AgentPipeline(RuleBasedExtractor()))
-app = FastAPI(title="iOrganizer", version="0.1.0", description="Local-first personal information organizer")
+pipeline = AgentPipeline(RuleBasedExtractor())
+oauth_states: dict[str, float] = {}
+photo_sessions: dict[str, tuple[str, float]] = {}
+last_google_sync: str | None = None
+google_sync_error: str | None = None
+google_sync_lock = threading.Lock()
+
+
+def collect_google_suggestions() -> int:
+    global next_suggestion_id, last_google_sync, google_sync_error
+    with google_sync_lock:
+        candidates = google.sync_google_sources(pipeline)
+        known_refs = {item.source_ref for item in service.list_items() if item.source_ref}
+        known_refs.update(candidate.source_ref for candidate in suggestions.values() if candidate.source_ref)
+        added = 0
+        for candidate in candidates:
+            if candidate.source_ref and candidate.source_ref in known_refs:
+                continue
+            suggestion_id = next_suggestion_id
+            next_suggestion_id += 1
+            suggestions[suggestion_id] = candidate
+            if candidate.source_ref:
+                known_refs.add(candidate.source_ref)
+            added += 1
+        last_google_sync = datetime.now().astimezone().isoformat()
+        google_sync_error = None
+        return added
+
+
+async def auto_google_sync() -> None:
+    global google_sync_error
+    while True:
+        try:
+            status = google.connection_status()
+            if status.get("connected") and (status.get("calendar") or status.get("gmail")):
+                await run_in_threadpool(collect_google_suggestions)
+        except Exception as exc:
+            google_sync_error = str(exc)[:300]
+        await asyncio.sleep(1800)
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    task = asyncio.create_task(auto_google_sync())
+    try:
+        yield
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+app = FastAPI(title="iOrganizer", version="0.1.0", description="Local-first personal information organizer", lifespan=lifespan)
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
@@ -79,6 +137,128 @@ next_suggestion_id = 1
 @app.get("/api/v1/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/api/v1/google/status")
+def google_status() -> dict:
+    return {**google.connection_status(), "last_sync": last_google_sync,
+            "sync_error": google_sync_error, "sync_interval_minutes": 30}
+
+
+@app.get("/api/v1/google/authorize")
+def google_authorize():
+    try:
+        url, state = google.authorization_url()
+    except google.GoogleIntegrationError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    oauth_states[state] = time.time() + 600
+    return RedirectResponse(url)
+
+
+@app.get("/oauth/google/callback", include_in_schema=False)
+async def google_callback(request: Request):
+    state = request.query_params.get("state", "")
+    expires = oauth_states.pop(state, 0)
+    if not state or expires < time.time():
+        raise HTTPException(400, "Google sign-in expired. Return to iOrganizer and connect again.")
+    if request.query_params.get("error"):
+        return HTMLResponse("<h2>Google connection was not completed.</h2><p>Return to iOrganizer and try again.</p>", status_code=400)
+    try:
+        flow = google.make_oauth_flow(state=state)
+        flow.fetch_token(authorization_response=str(request.url))
+        google.save_credentials(flow.credentials)
+        await run_in_threadpool(collect_google_suggestions)
+    except google.GoogleIntegrationError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(502, "Google sign-in could not be completed. Check the authorized redirect URI and try again.") from exc
+    return RedirectResponse("/")
+
+
+@app.post("/api/v1/google/disconnect", status_code=204)
+def google_disconnect() -> None:
+    google.disconnect_google()
+
+
+@app.post("/api/v1/google/sync")
+async def google_sync() -> dict:
+    global google_sync_error
+    try:
+        added = await run_in_threadpool(collect_google_suggestions)
+        return {"added": added, "last_sync": last_google_sync}
+    except google.GoogleNotConnected as exc:
+        raise HTTPException(401, str(exc)) from exc
+    except google.GoogleIntegrationError as exc:
+        google_sync_error = str(exc)
+        raise HTTPException(502, str(exc)) from exc
+
+
+@app.post("/api/v1/google/photos/sessions")
+def google_photos_create() -> dict:
+    try:
+        result = google.create_photos_session()
+    except google.GoogleNotConnected as exc:
+        raise HTTPException(401, str(exc)) from exc
+    except google.GoogleIntegrationError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    key = secrets.token_urlsafe(24)
+    photo_sessions[key] = (result["session_id"], time.time() + 1800)
+    return {"session_key": key, "picker_uri": result["picker_uri"],
+            "polling_config": result.get("polling_config", {})}
+
+
+def get_photo_session(session_key: str) -> str:
+    record = photo_sessions.get(session_key)
+    if not record or record[1] < time.time():
+        photo_sessions.pop(session_key, None)
+        raise HTTPException(404, "Photo selection expired. Start a new selection.")
+    return record[0]
+
+
+@app.get("/api/v1/google/photos/sessions/{session_key}")
+def google_photos_status(session_key: str) -> dict:
+    try:
+        result = google.get_photos_session(get_photo_session(session_key))
+        return {"ready": result["ready"], "polling_config": result.get("polling_config", {})}
+    except google.GoogleNotConnected as exc:
+        raise HTTPException(401, str(exc)) from exc
+    except google.GoogleIntegrationError as exc:
+        raise HTTPException(502, str(exc)) from exc
+
+
+@app.post("/api/v1/google/photos/sessions/{session_key}/import")
+async def google_photos_import(session_key: str) -> dict:
+    global next_suggestion_id
+    session_id = get_photo_session(session_key)
+    try:
+        candidates, processed = await run_in_threadpool(google.import_selected_photos, session_id, pipeline)
+    except google.GoogleNotConnected as exc:
+        raise HTTPException(401, str(exc)) from exc
+    except (google.GoogleIntegrationError, PhotoOcrError) as exc:
+        raise HTTPException(502, str(exc)) from exc
+    photo_sessions.pop(session_key, None)
+    output = []
+    for candidate in candidates:
+        suggestion_id = next_suggestion_id
+        next_suggestion_id += 1
+        suggestions[suggestion_id] = candidate
+        output.append(SuggestionResponse(id=suggestion_id, title=candidate.title, body=candidate.body,
+                                         kind=candidate.kind, category=candidate.category,
+                                         source_ref=candidate.source_ref))
+    return {"processed": processed, "suggestions": output}
+
+
+@app.get("/api/v1/suggestions", response_model=list[SuggestionResponse])
+def list_suggestions() -> list[SuggestionResponse]:
+    return [SuggestionResponse(id=key, title=value.title, body=value.body, kind=value.kind,
+                               category=value.category, source_ref=value.source_ref)
+            for key, value in suggestions.items()]
+
+
+@app.delete("/api/v1/suggestions/{suggestion_id}", status_code=204)
+def dismiss_suggestion(suggestion_id: int) -> None:
+    if suggestions.pop(suggestion_id, None) is None:
+        raise HTTPException(404, "Suggestion not found or already reviewed")
 
 
 @app.post("/api/v1/items", response_model=ItemResponse, status_code=201)

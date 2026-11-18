@@ -133,3 +133,54 @@ sequenceDiagram
     UserReview->>API: POST /api/v1/suggestions/{id}/accept
     API-->>Browser: Saved item response
 ```
+
+## Google Calendar and Gmail sync
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant UI as Local UI
+    participant API as FastAPI
+    participant OAuth as Google OAuth
+    participant Keychain as macOS Keychain
+    participant Source as Calendar/Gmail adapters
+    participant Review as Suggestion inbox
+    User->>UI: Connect Google
+    UI->>API: GET /google/authorize
+    API-->>User: Redirect to consent with state + read-only scopes
+    User->>OAuth: Approve access
+    OAuth->>API: Redirect callback with code + state
+    API->>API: Validate one-time state
+    API->>OAuth: Exchange code for tokens
+    API->>Keychain: Store credentials
+    API->>Source: Fetch authorized records
+    Source-->>API: Candidate proposals with source IDs
+    API->>Review: Deduplicate and queue proposals
+    API-->>UI: Redirect to organizer
+    User->>UI: Review and accept selected proposal
+    UI->>API: POST /suggestions/{id}/accept
+    API-->>UI: Persisted item
+```
+
+## Google Photos selection
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant UI as Local UI
+    participant API as FastAPI
+    participant Picker as Google Photos Picker
+    participant OCR as Local Tesseract
+    User->>UI: Choose Google Photos
+    UI->>API: POST /google/photos/sessions
+    API->>Picker: Create session capped at 10 items
+    Picker-->>UI: Picker URI and recommended poll interval
+    User->>Picker: Select photos
+    UI->>API: Poll session status
+    API->>Picker: GET session / selected media items
+    Picker-->>API: Selected image bytes
+    API->>OCR: OCR temporary bytes
+    OCR-->>API: Extracted text
+    API-->>UI: Reviewable candidates
+    User->>UI: Accept chosen candidates
+```

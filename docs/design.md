@@ -4,7 +4,7 @@
 
 `FastAPI router → OrganizerService → ItemRepository interface → SQLAlchemy adapter → SQLite`
 
-Import processing uses `router → AgentPipeline → ContentExtractor strategy → Candidate`; candidates become persistent items only after explicit acceptance. Domain objects do not depend on FastAPI or SQLAlchemy.
+Import processing uses `router → AgentPipeline → ContentExtractor strategy → Candidate`; candidates become persistent items only after explicit acceptance. Authorized Google reads use `GoogleSource` adapters for Calendar and Gmail, with OAuth credentials isolated in Keychain. Google Photos Picker is a separate user selection adapter; selected image bytes pass to local OCR. Domain objects do not depend on FastAPI or SQLAlchemy.
 
 ## Main classes and responsibilities
 
@@ -20,30 +20,35 @@ Import processing uses `router → AgentPipeline → ContentExtractor strategy �
 | `RuleBasedExtractor` | Offline, explainable baseline extraction agent |
 | `photo_ocr.extract_text` | Normalizes an explicitly uploaded image and invokes local Tesseract OCR; discards temporary image files |
 | `AgentPipeline` | Orchestrates the selected extractor |
+| `GoogleSource` | Read-only Google connector interface returning `Candidate` proposals |
+| `CalendarConnector`, `GmailConnector` | Fetch and map API records into candidates |
+| `google_integrations` OAuth functions | Authorize, refresh and store credentials in Keychain; coordinate connectors |
+| Google Photos Picker functions | Create selection sessions, retrieve selected image bytes and invoke local OCR |
 | `ItemCreate`, `ItemResponse` | API input/output contracts |
 
 ## Object-oriented principles
 
-- **Abstraction:** `ItemRepository` and `ContentExtractor` hide infrastructure and algorithm details.
+- **Abstraction:** `ItemRepository`, `ContentExtractor`, and `GoogleSource` hide infrastructure and algorithm details.
 - **Encapsulation:** `OrganizerItem.update()` owns state transitions and refreshes `updated_at`; service keeps collaborators private.
 - **Inheritance:** concrete repository and extractor adapters implement abstract base classes.
-- **Polymorphism:** service accepts any `ItemRepository`; pipeline accepts any `ContentExtractor` (rule-based now, local-model strategy later).
+- **Polymorphism:** service accepts any `ItemRepository`; pipeline accepts any `ContentExtractor`; Google sync accepts any `GoogleSource` connector.
 
 ## SOLID mapping
 
 - **SRP:** API validates/translates HTTP; service coordinates; repository persists; extractor proposes candidates; domain owns item behavior.
-- **OCP:** add an extractor or persistence adapter by implementing its port, without rewriting service logic.
-- **LSP:** any repository implementation must honor the same save/get/list/delete semantics; any extractor returns valid `Candidate` values.
-- **ISP:** small focused ports (`ItemRepository`, `ContentExtractor`) avoid a broad all-purpose integration interface.
-- **DIP:** high-level `OrganizerService` depends on `ItemRepository`; `AgentPipeline` depends on `ContentExtractor`, not SQLite or a model vendor.
+- **OCP:** add an extractor, persistence adapter, or read-only source connector by implementing its port, without rewriting the service or sync coordinator.
+- **LSP:** repository implementations preserve save/get/list/delete semantics; extractors and Google source connectors return valid `Candidate` values.
+- **ISP:** focused ports (`ItemRepository`, `ContentExtractor`, `GoogleSource`) avoid a broad all-purpose integration interface.
+- **DIP:** high-level `OrganizerService` depends on `ItemRepository`; `AgentPipeline` depends on `ContentExtractor`; Google sync depends on the `GoogleSource` abstraction.
 
 ## Patterns and rationale
 
 - **Repository (structural):** isolates domain/service from persistence.
 - **Strategy (behavioral):** extraction algorithm can switch from rules to local model while preserving pipeline contract. OCR is a local adapter invoked only for user-selected images.
+- **Adapter (structural):** Calendar and Gmail connectors map third-party REST responses to internal candidates; the Photos Picker adapts explicit selections to the same candidate review flow.
 - **Factory / composition root (creational):** module-level setup constructs engine, repository, extractor, pipeline, and service in one place; production can move this to app lifespan/DI.
 - **DTO / Data Mapper (structural):** Pydantic request/response types and SQLAlchemy mapping keep transport/storage types out of the domain.
-- **Observer:** intentionally deferred; no asynchronous notification need exists in the MVP. Add only when reminders/background jobs are introduced.
+- **Observer:** intentionally deferred; current refresh is a simple app-lifespan timer, not a notification bus. Add Observer if item changes need multiple independent subscribers.
 - **Singleton:** intentionally not required. Database engine is one application-scoped object by composition, while test instances should remain isolated.
 
 ## API method boundaries
