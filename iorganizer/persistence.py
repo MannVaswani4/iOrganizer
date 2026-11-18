@@ -4,7 +4,7 @@ import os
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import Boolean, DateTime, Integer, String, Text, create_engine, select
+from sqlalchemy import Boolean, DateTime, Integer, String, Text, create_engine, inspect, select, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 from .domain import ItemKind, ItemStatus, OrganizerItem
@@ -40,6 +40,7 @@ class GmailMessageTriageRow(Base):
     received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     processed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     review_state: Mapped[str] = mapped_column(String(20), nullable=False, default="pending", index=True)
+    triage_version: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
 
 
 class GmailScanStateRow(Base):
@@ -108,4 +109,10 @@ def make_database(database_url: str | None = None) -> tuple[sessionmaker[Session
         os.makedirs(os.path.dirname(url.removeprefix("sqlite:///")) or ".", exist_ok=True)
     engine = create_engine(url, connect_args={"check_same_thread": False} if url.startswith("sqlite") else {})
     Base.metadata.create_all(engine)
+    columns = {column["name"] for column in inspect(engine).get_columns("gmail_message_triage")}
+    if "triage_version" not in columns:
+        with engine.begin() as connection:
+            connection.execute(text(
+                "ALTER TABLE gmail_message_triage ADD COLUMN triage_version INTEGER NOT NULL DEFAULT 1"
+            ))
     return sessionmaker(engine, expire_on_commit=False), engine

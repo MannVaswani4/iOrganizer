@@ -106,6 +106,16 @@ def add_candidate_suggestions(candidates: list[Candidate]) -> int:
         return added
 
 
+def remove_candidate_suggestions(source_refs: list[str]) -> None:
+    if not source_refs:
+        return
+    refs = set(source_refs)
+    with suggestion_lock:
+        for suggestion_id, candidate in list(suggestions.items()):
+            if candidate.source_ref in refs:
+                del suggestions[suggestion_id]
+
+
 def collect_google_suggestions() -> int:
     global last_google_sync, google_sync_error
     candidates = google.sync_google_sources(pipeline)
@@ -118,7 +128,7 @@ def collect_google_suggestions() -> int:
 def run_gmail_scan() -> None:
     global gmail_scan_running, gmail_scan_error
     try:
-        gmail_scanner.scan(add_candidate_suggestions)
+        gmail_scanner.scan(add_candidate_suggestions, remove_candidate_suggestions)
         gmail_scan_error = None
     except Exception as exc:
         gmail_scan_error = str(exc)[:500]

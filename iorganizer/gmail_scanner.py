@@ -3,12 +3,13 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from email.header import decode_header, make_header
+import re
 from typing import Callable
 
 from google.auth.transport.requests import AuthorizedSession
 
 from .domain import Candidate, ItemKind
-from .email_agent import LocalEmailTriageAgent
+from .email_agent import EmailTriageResult, LocalEmailTriageAgent
 from .email_store import GmailTriageStore
 from .google_integrations import (GMAIL_SCOPE, GoogleIntegrationError, GoogleNotConnected,
                                  GmailMessagesConnector, _decode_gmail_body, load_credentials)
@@ -21,6 +22,22 @@ def _header_text(value: str, limit: int) -> str:
         return value[:limit]
 
 
+_MARKETING_PATTERNS = re.compile(
+    r"\b(?:weekly deals|new arrivals|browse (?:our|the) latest|subscribe to (?:our )?newsletter|"
+    r"coupon code|promo code|shop now|sale ends|\d{1,3}(?:%| percent)\s*(?:off|discount)|"
+    r"(?:save|saving)\s+(?:up to\s+)?\d{1,3}(?:%| percent)|limited.time offer)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_marketing_message(message: dict, headers: dict[str, str], subject: str, body: str) -> bool:
+    if "CATEGORY_PROMOTIONS" in message.get("labelIds", []):
+        return True
+    if headers.get("list-unsubscribe"):
+        return True
+    return bool(_MARKETING_PATTERNS.search(f"{subject}\n{body[:4000]}"))
+
+
 class GmailMailboxScanner:
     def __init__(self, store: GmailTriageStore, agent: LocalEmailTriageAgent,
                  connector: GmailMessagesConnector | None = None) -> None:
@@ -28,7 +45,8 @@ class GmailMailboxScanner:
         self.agent = agent
         self.connector = connector or GmailMessagesConnector()
 
-    def scan(self, on_important: Callable[[list[Candidate]], None]) -> None:
+    def scan(self, on_important: Callable[[list[Candidate]], None],
+             on_ignored: Callable[[list[str]], None] | None = None) -> None:
         credentials = load_credentials(required_scope=GMAIL_SCOPE)
         session = AuthorizedSession(credentials)
         state = self.store.scan_state()
@@ -47,6 +65,7 @@ class GmailMailboxScanner:
                 seen += len(message_ids)
                 records: list[dict] = []
                 candidates: list[Candidate] = []
+                ignored_refs: list[str] = []
                 for message_id in message_ids:
                     if message_id in known:
                         continue
@@ -60,11 +79,14 @@ class GmailMailboxScanner:
                     internal_ms = message.get("internalDate")
                     received_at = (datetime.fromtimestamp(int(internal_ms) / 1000, timezone.utc)
                                    if internal_ms else None)
-                    triage = self.agent.classify(
-                        subject=subject, sender=sender,
-                        received_at=received_at.isoformat() if received_at else "",
-                        body=body,
-                    )
+                    if _is_marketing_message(message, headers, subject, body):
+                        triage = EmailTriageResult(False, "", "none")
+                    else:
+                        triage = self.agent.classify(
+                            subject=subject, sender=sender,
+                            received_at=received_at.isoformat() if received_at else "",
+                            body=body,
+                        )
                     records.append({
                         "message_id": message_id,
                         "is_important": triage.important,
@@ -79,6 +101,8 @@ class GmailMailboxScanner:
                         candidates.append(Candidate(title=subject[:200], body=triage.summary,
                                                     kind=ItemKind.NOTE, category=triage.category,
                                                     source_ref=f"gmail:{message_id}"))
+                    else:
+                        ignored_refs.append(f"gmail:{message_id}")
                     if len(records) >= 10:
                         self.store.record_many(records)
                         records.clear()
@@ -90,10 +114,15 @@ class GmailMailboxScanner:
                         if candidates:
                             on_important(candidates)
                             candidates.clear()
+                        if ignored_refs and on_ignored:
+                            on_ignored(ignored_refs)
+                            ignored_refs.clear()
 
                 self.store.record_many(records)
                 if candidates:
                     on_important(candidates)
+                if ignored_refs and on_ignored:
+                    on_ignored(ignored_refs)
                 page_token = result.get("nextPageToken")
                 if not page_token and not recent_only:
                     initial_complete = True

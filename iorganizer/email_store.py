@@ -9,6 +9,8 @@ from sqlalchemy.orm import Session, sessionmaker
 from .domain import Candidate, ItemKind
 from .persistence import GmailMessageTriageRow, GmailScanStateRow
 
+TRIAGE_VERSION = 3
+
 
 class GmailTriageStore:
     def __init__(self, sessions: sessionmaker[Session]) -> None:
@@ -19,7 +21,8 @@ class GmailTriageStore:
             return set()
         with self._sessions() as session:
             return set(session.scalars(select(GmailMessageTriageRow.message_id).where(
-                GmailMessageTriageRow.message_id.in_(message_ids)
+                GmailMessageTriageRow.message_id.in_(message_ids),
+                GmailMessageTriageRow.triage_version == TRIAGE_VERSION,
             )))
 
     def record_many(self, results: list[dict]) -> None:
@@ -32,6 +35,7 @@ class GmailTriageStore:
                     title=result.get("title"), summary=result.get("summary"), category=result.get("category"),
                     received_at=result.get("received_at"), processed_at=datetime.now(timezone.utc),
                     review_state="pending" if result["is_important"] else "ignored",
+                    triage_version=TRIAGE_VERSION,
                 ))
 
     def save_scan_state(self, *, page_token: str | None, initial_complete: bool,
