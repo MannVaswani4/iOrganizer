@@ -78,3 +78,4 @@ const suggestionSwipeObserver=new MutationObserver(()=>document.querySelectorAll
 suggestionSwipeObserver.observe($('#suggestion-list'),{childList:true});
 loadGmailScanStatus();
 const googleSyncHint=$('#google-status').parentElement.querySelector('.file-hint');if(googleSyncHint)googleSyncHint.textContent='Calendar syncs every 30 minutes; Gmail refreshes its last 3 days every 3 days.';
+let reviewAutoOpened=false;const loadSuggestionsBeforeAutoReview=loadSuggestions;loadSuggestions=async function(){await loadSuggestionsBeforeAutoReview();if(state.suggestions.length&&!reviewAutoOpened&&state.view==='dashboard'){reviewAutoOpened=true;showImportReview()}};loadSuggestions();
