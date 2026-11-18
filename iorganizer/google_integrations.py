@@ -6,10 +6,12 @@ import json
 import os
 import re
 from abc import ABC, abstractmethod
+from threading import Lock
 from datetime import date, datetime, time, timedelta, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urljoin
+from urllib.parse import urlsplit
 
 import keyring
 from google.auth.transport.requests import AuthorizedSession, Request
@@ -37,6 +39,7 @@ CALENDAR_API = "https://www.googleapis.com/calendar/v3/"
 GMAIL_API = "https://gmail.googleapis.com/gmail/v1/"
 MAX_GOOGLE_PHOTOS_PER_SESSION = 10
 MAX_PHOTO_BYTES = 10_000_000
+_oauth_transport_lock = Lock()
 
 
 class GoogleNotConnected(RuntimeError):
@@ -89,6 +92,30 @@ def authorization_url() -> tuple[str, str, str]:
     if not flow.code_verifier:
         raise GoogleIntegrationError("Could not initialize secure Google sign-in.")
     return url, state, flow.code_verifier
+
+
+def exchange_oauth_code(flow: Flow, callback_url: str) -> None:
+    """Exchange a code from our exact loopback callback; Google endpoints remain HTTPS."""
+    parsed = urlsplit(callback_url)
+    if (parsed.scheme != "http" or parsed.hostname != "127.0.0.1" or parsed.port != 8765
+            or parsed.path != "/oauth/google/callback" or parsed.username or parsed.password):
+        raise GoogleIntegrationError("Google returned to an unexpected OAuth callback address.")
+    token_endpoint = urlsplit(flow.client_config.get("token_uri", ""))
+    if token_endpoint.scheme != "https" or token_endpoint.hostname not in {"oauth2.googleapis.com", "accounts.google.com"}:
+        raise GoogleIntegrationError("The configured Google token endpoint must use HTTPS.")
+
+    # OAuthlib rejects HTTP callback URLs by default. Permit only this validated
+    # loopback response, and restore the process setting immediately afterwards.
+    with _oauth_transport_lock:
+        old_value = os.environ.get("OAUTHLIB_INSECURE_TRANSPORT")
+        os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
+        try:
+            flow.fetch_token(authorization_response=callback_url)
+        finally:
+            if old_value is None:
+                os.environ.pop("OAUTHLIB_INSECURE_TRANSPORT", None)
+            else:
+                os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = old_value
 
 
 def save_credentials(credentials: Credentials) -> None:

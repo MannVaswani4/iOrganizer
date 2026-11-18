@@ -171,7 +171,7 @@ async def google_callback(request: Request):
         flow = google.make_oauth_flow(state=state)
         flow.code_verifier = code_verifier
         try:
-            flow.fetch_token(authorization_response=str(request.url))
+            google.exchange_oauth_code(flow, str(request.url))
         except Exception as exc:
             logger.exception("Google OAuth token exchange failed (%s)", type(exc).__name__)
             raise HTTPException(
