@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import secrets
 import threading
 import time
@@ -21,6 +22,8 @@ from .persistence import SqlAlchemyItemRepository, make_database
 from .photo_ocr import PhotoOcrError, SUPPORTED_PHOTO_EXTENSIONS, extract_text
 from .services import OrganizerService, accept_candidate
 from . import google_integrations as google
+
+logger = logging.getLogger(__name__)
 
 
 class ItemCreate(BaseModel):
@@ -167,11 +170,20 @@ async def google_callback(request: Request):
     try:
         flow = google.make_oauth_flow(state=state)
         flow.code_verifier = code_verifier
-        flow.fetch_token(authorization_response=str(request.url))
+        try:
+            flow.fetch_token(authorization_response=str(request.url))
+        except Exception as exc:
+            logger.exception("Google OAuth token exchange failed (%s)", type(exc).__name__)
+            raise HTTPException(
+                502,
+                f"Google rejected the sign-in token exchange ({type(exc).__name__}). Start a fresh sign-in; if it repeats, share the server log error without sharing the callback URL.",
+            ) from exc
         google.save_credentials(flow.credentials)
         await run_in_threadpool(collect_google_suggestions)
     except google.GoogleIntegrationError as exc:
         raise HTTPException(502, str(exc)) from exc
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(502, "Google sign-in could not be completed. Check the authorized redirect URI and try again.") from exc
     return RedirectResponse("/")
