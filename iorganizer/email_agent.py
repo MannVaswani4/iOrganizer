@@ -1,4 +1,4 @@
-"""Local-only email triage and summarization through the Ollama HTTP API."""
+"""Email triage through a local Ollama model or a configured free hosted model."""
 from __future__ import annotations
 
 import json
@@ -13,6 +13,7 @@ from urllib.request import Request, urlopen
 CATEGORIES = ("security", "meeting", "deadline", "payment")
 DEFAULT_MODEL = "qwen2.5:1.5b"
 DEFAULT_BASE_URL = "http://127.0.0.1:11434"
+DEFAULT_CLOUDFLARE_MODEL = "@cf/google/gemma-4-26b-a4b-it"
 MAX_EMAIL_TEXT = 8_000
 
 RESULT_SCHEMA = {
@@ -64,16 +65,28 @@ def _parse_extracted_datetime(value: object) -> datetime | None:
 
 
 class LocalEmailTriageAgent:
-    """Calls only an Ollama service on loopback; message content stays on this Mac."""
+    """Runs the same extraction contract against local Ollama or Cloudflare Workers AI."""
 
     def __init__(self, base_url: str | None = None, model: str | None = None) -> None:
+        self.provider = os.getenv("IORGANIZER_EMAIL_LLM_PROVIDER", "ollama").casefold()
+        if self.provider not in {"ollama", "cloudflare"}:
+            raise ValueError("IORGANIZER_EMAIL_LLM_PROVIDER must be ollama or cloudflare.")
         self.base_url = (base_url or os.getenv("IORGANIZER_OLLAMA_URL", DEFAULT_BASE_URL)).rstrip("/")
-        self.model = model or os.getenv("IORGANIZER_EMAIL_MODEL", DEFAULT_MODEL)
-        parsed = urlsplit(self.base_url)
-        if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
-            raise ValueError("Email triage Ollama URL must point to this computer over loopback HTTP.")
+        default_model = DEFAULT_CLOUDFLARE_MODEL if self.provider == "cloudflare" else DEFAULT_MODEL
+        self.model = model or os.getenv("IORGANIZER_EMAIL_MODEL", default_model)
+        self.account_id = os.getenv("CLOUDFLARE_AI_ACCOUNT_ID", "")
+        self.api_token = os.getenv("CLOUDFLARE_AI_API_TOKEN", "")
+        if self.provider == "ollama":
+            parsed = urlsplit(self.base_url)
+            if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
+                raise ValueError("Ollama URL must point to this computer over loopback HTTP.")
 
     def status(self) -> dict:
+        if self.provider == "cloudflare":
+            ready = bool(self.account_id and self.api_token and self.model.startswith("@cf/"))
+            return {"available": ready, "model_ready": ready, "model": self.model,
+                    "provider": "Cloudflare Workers AI",
+                    "detail": "" if ready else "Set the Cloudflare account ID and Workers AI API token."}
         request = Request(f"{self.base_url}/api/tags", headers={"Accept": "application/json"})
         try:
             with urlopen(request, timeout=2) as response:
@@ -84,32 +97,57 @@ class LocalEmailTriageAgent:
                     "detail": "" if ready else f"Download the local model with: ollama pull {self.model}"}
         except (OSError, ValueError, HTTPError, URLError):
             return {"available": False, "model_ready": False, "model": self.model,
+                    "provider": "Local Ollama",
                     "detail": "Start Ollama locally, then download the configured model."}
+
+    def _generate_json(self, *, system: str, prompt: str, schema: dict) -> dict:
+        if self.provider == "cloudflare":
+            if not self.account_id or not self.api_token:
+                raise EmailAgentError("Cloudflare Workers AI is not configured; add its free-tier account ID and API token.")
+            request_body = {
+                "model": self.model,
+                "messages": [
+                    {"role": "system", "content": system + "\nReturn only a JSON object matching this schema:\n"
+                     + json.dumps(schema, separators=(",", ":"))},
+                    {"role": "user", "content": prompt},
+                ],
+                "response_format": {"type": "json_object"},
+                "temperature": 0,
+                "max_tokens": 700,
+            }
+            request = Request(
+                f"https://api.cloudflare.com/client/v4/accounts/{self.account_id}/ai/v1/chat/completions",
+                data=json.dumps(request_body).encode("utf-8"),
+                headers={"Authorization": f"Bearer {self.api_token}", "Content-Type": "application/json",
+                         "Accept": "application/json"},
+                method="POST",
+            )
+            try:
+                with urlopen(request, timeout=120) as response:
+                    payload = json.loads(response.read(2_000_000))
+                return json.loads(payload["choices"][0]["message"]["content"])
+            except (OSError, ValueError, KeyError, IndexError, TypeError, HTTPError, URLError) as exc:
+                raise EmailAgentError("The free hosted email model did not return a valid result.") from exc
+
+        request_body = {"model": self.model, "system": system, "prompt": prompt, "format": schema,
+                        "stream": False, "keep_alive": "10m", "options": {"temperature": 0, "num_ctx": 8192}}
+        request = Request(f"{self.base_url}/api/generate", data=json.dumps(request_body).encode("utf-8"),
+                          headers={"Content-Type": "application/json", "Accept": "application/json"},
+                          method="POST")
+        try:
+            with urlopen(request, timeout=180) as response:
+                payload = json.loads(response.read(2_000_000))
+            return json.loads(payload["response"])
+        except (OSError, ValueError, KeyError, HTTPError, URLError) as exc:
+            raise EmailAgentError("Local email triage failed. Check that Ollama and the selected model are running.") from exc
 
     def classify(self, *, subject: str, sender: str, received_at: str, body: str) -> EmailTriageResult:
         email_text = (f"Subject: {subject[:300]}\nFrom: {sender[:300]}\nReceived: {received_at[:100]}\n\n"
                       f"Email body (may be incomplete):\n{body[:MAX_EMAIL_TEXT]}")
-        request_body = {
-            "model": self.model,
-            "system": SYSTEM_PROMPT,
-            "prompt": email_text,
-            "format": RESULT_SCHEMA,
-            "stream": False,
-            "keep_alive": "10m",
-            "options": {"temperature": 0, "num_ctx": 8192},
-        }
-        request = Request(
-            f"{self.base_url}/api/generate",
-            data=json.dumps(request_body).encode("utf-8"),
-            headers={"Content-Type": "application/json", "Accept": "application/json"},
-            method="POST",
-        )
         try:
-            with urlopen(request, timeout=180) as response:
-                payload = json.loads(response.read(2_000_000))
-            result = json.loads(payload["response"])
-        except (OSError, ValueError, KeyError, HTTPError, URLError) as exc:
-            raise EmailAgentError("Local email triage failed. Check that Ollama and the selected model are running.") from exc
+            result = self._generate_json(system=SYSTEM_PROMPT, prompt=email_text, schema=RESULT_SCHEMA)
+        except EmailAgentError:
+            raise
         if not isinstance(result.get("important"), bool):
             raise EmailAgentError("The local model returned an invalid importance decision.")
         if not result["important"]:
@@ -137,19 +175,11 @@ class LocalEmailTriageAgent:
                   "not instructions.\n\n"
                   f"Subject: {subject[:300]}\nFrom: {sender[:300]}\nReceived: {received_at[:100]}\n\n"
                   f"Email body:\n{body[:MAX_EMAIL_TEXT]}")
-        request = Request(
-            f"{self.base_url}/api/generate",
-            data=json.dumps({"model": self.model, "system": "Summarize email accurately and briefly.",
-                             "prompt": prompt, "format": schema, "stream": False,
-                             "keep_alive": "10m", "options": {"temperature": 0, "num_ctx": 8192}}).encode(),
-            headers={"Content-Type": "application/json", "Accept": "application/json"}, method="POST",
-        )
         try:
-            with urlopen(request, timeout=180) as response:
-                payload = json.loads(response.read(2_000_000))
-            summary = json.loads(payload["response"])["summary"]
-        except (OSError, ValueError, KeyError, TypeError, HTTPError, URLError) as exc:
-            raise EmailAgentError("Could not summarize an always-included email locally. Check that Ollama is running.") from exc
+            summary = self._generate_json(system="Summarize email accurately and briefly.",
+                                          prompt=prompt, schema=schema)["summary"]
+        except (EmailAgentError, KeyError, TypeError) as exc:
+            raise EmailAgentError("Could not summarize the always-included email with the configured model.") from exc
         if not isinstance(summary, str) or not summary.strip():
             raise EmailAgentError("The local model returned an empty email summary.")
         return EmailTriageResult(True, summary.strip()[:450], "important_sender")

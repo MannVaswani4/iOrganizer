@@ -70,6 +70,13 @@ class GmailScanStateRow(Base):
     last_error: Mapped[str | None] = mapped_column(String(500))
 
 
+class AppSettingRow(Base):
+    """Small persistent store for single-workspace deployment settings and secrets."""
+    __tablename__ = "app_settings"
+    name: Mapped[str] = mapped_column(String(100), primary_key=True)
+    value: Mapped[str] = mapped_column(Text, nullable=False)
+
+
 class SqlAlchemyItemRepository(ItemRepository):
     def __init__(self, sessions: sessionmaker[Session]) -> None:
         self._sessions = sessions
@@ -119,9 +126,13 @@ class SqlAlchemyItemRepository(ItemRepository):
 
 def make_database(database_url: str | None = None) -> tuple[sessionmaker[Session], object]:
     url = database_url or os.getenv("IORGANIZER_DATABASE_URL", "sqlite:///./data/iorganizer.db")
+    # Neon supplies standard postgresql:// URLs. Use the installed Psycopg 3 driver.
+    if url.startswith("postgresql://"):
+        url = "postgresql+psycopg://" + url.removeprefix("postgresql://")
     if url.startswith("sqlite:///") and url != "sqlite:///:memory:":
         os.makedirs(os.path.dirname(url.removeprefix("sqlite:///")) or ".", exist_ok=True)
-    engine = create_engine(url, connect_args={"check_same_thread": False} if url.startswith("sqlite") else {})
+    engine = create_engine(url, connect_args={"check_same_thread": False} if url.startswith("sqlite") else {},
+                           pool_pre_ping=True)
     Base.metadata.create_all(engine)
     columns = {column["name"] for column in inspect(engine).get_columns("gmail_message_triage")}
     migrations = {

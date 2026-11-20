@@ -1,0 +1,33 @@
+services:
+  - type: web
+    name: iorganizer
+    runtime: docker
+    plan: free
+    healthCheckPath: /api/v1/health
+    envVars:
+      - key: IORGANIZER_DATABASE_URL
+        sync: false
+      - key: IORGANIZER_GOOGLE_CLIENT_FILE
+        value: /etc/secrets/google-oauth.json
+      - key: IORGANIZER_GOOGLE_REDIRECT_URI
+        sync: false
+      - key: IORGANIZER_OWNER_EMAIL
+        sync: false
+      - key: IORGANIZER_SESSION_SECRET
+        generateValue: true
+      - key: IORGANIZER_CREDENTIAL_STORAGE
+        value: database
+      - key: IORGANIZER_OAUTH_ENCRYPTION_KEY
+        sync: false
+      - key: IORGANIZER_COOKIE_HTTPS_ONLY
+        value: "true"
+      - key: IORGANIZER_EMAIL_LLM_PROVIDER
+        value: cloudflare
+      - key: IORGANIZER_EMAIL_MODEL
+        value: "@cf/google/gemma-4-26b-a4b-it"
+      - key: CLOUDFLARE_AI_ACCOUNT_ID
+        sync: false
+      - key: CLOUDFLARE_AI_API_TOKEN
+        sync: false
+      - key: IORGANIZER_CRON_SECRET
+        generateValue: true

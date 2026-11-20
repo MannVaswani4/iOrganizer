@@ -14,6 +14,7 @@ from urllib.parse import urljoin
 from urllib.parse import urlsplit
 
 import keyring
+from cryptography.fernet import Fernet, InvalidToken
 from google.auth.transport.requests import AuthorizedSession, Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
@@ -21,6 +22,7 @@ from google_auth_oauthlib.flow import Flow
 from .agents import AgentPipeline
 from .domain import Candidate, ItemKind
 from .photo_ocr import PhotoOcrError, extract_text
+from .persistence import AppSettingRow
 
 
 CALENDAR_READ_SCOPE = "https://www.googleapis.com/auth/calendar.events.readonly"
@@ -44,13 +46,20 @@ KEYRING_ACCOUNT = "local-user"
 KEYRING_IDENTITY_ACCOUNT = "local-user-google-identity"
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CLIENT_FILE = Path(os.getenv("IORGANIZER_GOOGLE_CLIENT_FILE", str(PROJECT_ROOT / "secrets/client_secret.json")))
-REDIRECT_URI = "http://127.0.0.1:8765/oauth/google/callback"
+REDIRECT_URI = os.getenv("IORGANIZER_GOOGLE_REDIRECT_URI", "http://127.0.0.1:8765/oauth/google/callback")
 PHOTOS_API = "https://photospicker.googleapis.com/v1/"
 CALENDAR_API = "https://www.googleapis.com/calendar/v3/"
 GMAIL_API = "https://gmail.googleapis.com/gmail/v1/"
 MAX_GOOGLE_PHOTOS_PER_SESSION = 10
 MAX_PHOTO_BYTES = 10_000_000
 _oauth_transport_lock = Lock()
+_credential_sessions = None
+
+
+def configure_credential_storage(sessions) -> None:
+    """Provide persistent storage for deployments that cannot use an OS keyring."""
+    global _credential_sessions
+    _credential_sessions = sessions
 
 
 class GoogleNotConnected(RuntimeError):
@@ -124,11 +133,16 @@ def authorization_url() -> tuple[str, str, str]:
 
 
 def exchange_oauth_code(flow: Flow, callback_url: str) -> None:
-    """Exchange a code from our exact loopback callback; Google endpoints remain HTTPS."""
+    """Exchange a code only from the configured OAuth callback."""
     parsed = urlsplit(callback_url)
-    if (parsed.scheme != "http" or parsed.hostname != "127.0.0.1" or parsed.port != 8765
-            or parsed.path != "/oauth/google/callback" or parsed.username or parsed.password):
+    expected = urlsplit(REDIRECT_URI)
+    if ((parsed.scheme, parsed.netloc, parsed.path) != (expected.scheme, expected.netloc, expected.path)
+            or parsed.username or parsed.password or parsed.fragment):
         raise GoogleIntegrationError("Google returned to an unexpected OAuth callback address.")
+    if expected.scheme == "http" and expected.hostname not in {"127.0.0.1", "localhost"}:
+        raise GoogleIntegrationError("HTTP OAuth callbacks are allowed only for local development.")
+    if expected.scheme not in {"http", "https"}:
+        raise GoogleIntegrationError("The configured OAuth callback must use HTTP or HTTPS.")
     token_endpoint = urlsplit(flow.client_config.get("token_uri", ""))
     if token_endpoint.scheme != "https" or token_endpoint.hostname not in {"oauth2.googleapis.com", "accounts.google.com"}:
         raise GoogleIntegrationError("The configured Google token endpoint must use HTTPS.")
@@ -148,6 +162,26 @@ def exchange_oauth_code(flow: Flow, callback_url: str) -> None:
 
 
 def save_credentials(credentials: Credentials, *, account_email: str | None = None) -> None:
+    if os.getenv("IORGANIZER_CREDENTIAL_STORAGE", "keyring").casefold() == "database":
+        if _credential_sessions is None:
+            raise GoogleIntegrationError("Persistent Google credential storage is not configured.")
+        key = os.getenv("IORGANIZER_OAUTH_ENCRYPTION_KEY", "")
+        if not key:
+            raise GoogleIntegrationError("Set the Google credential encryption key in the deployment environment.")
+        try:
+            current = _read_database_credentials()
+            identity = account_email.casefold() if account_email else (current or {}).get("account_email")
+            payload = json.dumps({"credentials": json.loads(credentials.to_json()),
+                                  "account_email": identity}, separators=(",", ":"))
+            encrypted = Fernet(key.encode("ascii")).encrypt(payload.encode("utf-8")).decode("ascii")
+            _write_database_token(encrypted)
+            return
+        except (ValueError, TypeError, UnicodeError, InvalidToken) as exc:
+            raise GoogleIntegrationError("Could not encrypt Google credentials for persistent storage.") from exc
+        except Exception as exc:
+            if isinstance(exc, GoogleIntegrationError):
+                raise
+            raise GoogleIntegrationError("Could not save encrypted Google credentials to the database.") from exc
     try:
         keyring.set_password(KEYRING_SERVICE, KEYRING_ACCOUNT, credentials.to_json())
         if account_email:
@@ -159,19 +193,38 @@ def save_credentials(credentials: Credentials, *, account_email: str | None = No
 
 
 def load_credentials(*, required_scope: str | None = None) -> Credentials:
-    try:
-        serialized = keyring.get_password(KEYRING_SERVICE, KEYRING_ACCOUNT)
-    except Exception as exc:
-        raise GoogleIntegrationError("Could not read Google tokens from macOS Keychain.") from exc
-    if not serialized:
-        raise GoogleNotConnected("Connect your Google account first.")
-    try:
-        # Preserve the scopes actually granted and serialized by Google. Passing the
-        # app's current desired scopes here would incorrectly make an old read-only
-        # token look as if it already had Calendar write access.
-        credentials = Credentials.from_authorized_user_info(json.loads(serialized))
-    except (ValueError, TypeError, json.JSONDecodeError) as exc:
-        raise GoogleIntegrationError("Stored Google authorization is invalid. Disconnect and reconnect.") from exc
+    if os.getenv("IORGANIZER_CREDENTIAL_STORAGE", "keyring").casefold() == "database":
+        if _credential_sessions is None:
+            raise GoogleIntegrationError("Persistent Google credential storage is not configured.")
+        key = os.getenv("IORGANIZER_OAUTH_ENCRYPTION_KEY", "")
+        if not key:
+            raise GoogleIntegrationError("Set the Google credential encryption key in the deployment environment.")
+        try:
+            payload = _read_database_credentials()
+            serialized = payload.get("credentials") if payload else None
+            if not serialized:
+                raise GoogleNotConnected("Connect your Google account first.")
+            credentials = Credentials.from_authorized_user_info(serialized)
+        except GoogleNotConnected:
+            raise
+        except (ValueError, TypeError, UnicodeError, InvalidToken, json.JSONDecodeError) as exc:
+            raise GoogleIntegrationError("Stored Google authorization is invalid. Disconnect and reconnect.") from exc
+        except Exception as exc:
+            if isinstance(exc, GoogleIntegrationError):
+                raise
+            raise GoogleIntegrationError("Could not read encrypted Google credentials from the database.") from exc
+    else:
+        try:
+            serialized = keyring.get_password(KEYRING_SERVICE, KEYRING_ACCOUNT)
+        except Exception as exc:
+            raise GoogleIntegrationError("Could not read Google tokens from macOS Keychain.") from exc
+        if not serialized:
+            raise GoogleNotConnected("Connect your Google account first.")
+        try:
+            # Preserve scopes actually granted by Google; do not imply newly added scopes.
+            credentials = Credentials.from_authorized_user_info(json.loads(serialized))
+        except (ValueError, TypeError, json.JSONDecodeError) as exc:
+            raise GoogleIntegrationError("Stored Google authorization is invalid. Disconnect and reconnect.") from exc
     if credentials.expired and credentials.refresh_token:
         try:
             credentials.refresh(Request())
@@ -197,10 +250,16 @@ def connection_status() -> dict:
                 "gmail": False, "photos": False,
                 "scopes": [], "error": str(exc)}
     granted = set(credentials.granted_scopes or credentials.scopes or [])
-    try:
-        linked_email = keyring.get_password(KEYRING_SERVICE, KEYRING_IDENTITY_ACCOUNT)
-    except Exception:
-        linked_email = None
+    if os.getenv("IORGANIZER_CREDENTIAL_STORAGE", "keyring").casefold() == "database":
+        try:
+            linked_email = (_read_database_credentials() or {}).get("account_email")
+        except Exception:
+            linked_email = None
+    else:
+        try:
+            linked_email = keyring.get_password(KEYRING_SERVICE, KEYRING_IDENTITY_ACCOUNT)
+        except Exception:
+            linked_email = None
     return {
         "connected": True,
         "identity_verified": bool(linked_email),
@@ -214,6 +273,14 @@ def connection_status() -> dict:
 
 
 def disconnect_google() -> None:
+    if os.getenv("IORGANIZER_CREDENTIAL_STORAGE", "keyring").casefold() == "database":
+        if _credential_sessions is None:
+            raise GoogleIntegrationError("Persistent Google credential storage is not configured.")
+        try:
+            _write_database_token(None)
+            return
+        except Exception as exc:
+            raise GoogleIntegrationError("Could not remove Google credentials from persistent storage.") from exc
     for account in (KEYRING_ACCOUNT, KEYRING_IDENTITY_ACCOUNT):
         try:
             keyring.delete_password(KEYRING_SERVICE, account)
@@ -221,6 +288,34 @@ def disconnect_google() -> None:
             continue
         except Exception as exc:
             raise GoogleIntegrationError("Could not remove Google authorization from Keychain.") from exc
+
+
+def _read_database_credentials() -> dict | None:
+    if _credential_sessions is None:
+        raise GoogleIntegrationError("Persistent Google credential storage is not configured.")
+    key = os.getenv("IORGANIZER_OAUTH_ENCRYPTION_KEY", "")
+    if not key:
+        raise GoogleIntegrationError("Set the Google credential encryption key in the deployment environment.")
+    with _credential_sessions() as session:
+        row = session.get(AppSettingRow, "google_credentials")
+        if row is None:
+            return None
+        decrypted = Fernet(key.encode("ascii")).decrypt(row.value.encode("ascii"))
+        return json.loads(decrypted)
+
+
+def _write_database_token(value: str | None) -> None:
+    if _credential_sessions is None:
+        raise GoogleIntegrationError("Persistent Google credential storage is not configured.")
+    with _credential_sessions.begin() as session:
+        row = session.get(AppSettingRow, "google_credentials")
+        if value is None:
+            if row is not None:
+                session.delete(row)
+        elif row is None:
+            session.add(AppSettingRow(name="google_credentials", value=value))
+        else:
+            row.value = value
 
 
 class _TextOnly(HTMLParser):

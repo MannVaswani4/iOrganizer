@@ -8,7 +8,7 @@ This repository is the capstone project for **System Design and Agentic AI**. It
 
 ## Problem and solution
 
-Personal commitments and useful information are scattered across calendars, conversations, and notes. iOrganizer brings user-authorized sources into one searchable inbox. Small agents extract candidate tasks/events, suggest categories and due dates, and let the user review results before saving them. The user remains in control: there is no background scanning of the device; Google sync only accesses the APIs the user authorized, and nothing is sent to a paid hosted AI service.
+Personal commitments and useful information are scattered across calendars, conversations, and notes. iOrganizer brings user-authorized sources into one searchable inbox. Small agents extract candidate tasks/events, suggest categories and due dates, and let the user review results before saving them. The user remains in control: there is no background scanning of the device; Google sync only accesses APIs the user authorized. Email triage uses free local Ollama by default. A deployment can optionally use Cloudflare Workers AI's free daily allocation; when enabled, email text is sent to Cloudflare for classification.
 
 ## MVP scope
 
@@ -16,22 +16,22 @@ Personal commitments and useful information are scattered across calendars, conv
 - Add a quick note or task through the API.
 - Import `.ics` calendar files, plain-text chat exports, and user-selected photos through explicit upload endpoints. Photo text is extracted locally with Tesseract OCR; source images are temporary and are not saved.
 - Optionally connect Google Calendar, Gmail, and Google Photos Picker. Calendar event creation requires the Calendar events write scope; Gmail and Photos Picker remain read-only/user-selected.
-- Scan Gmail with a local Ollama model for only four actionable categories: account security, meetings/evaluations, deadlines, and payments. Extract dates and concise summaries for review; original email bodies are not stored.
+- Scan Gmail with local Ollama by default, or an optional configured hosted model, for four actionable categories: account security, meetings/evaluations, deadlines, and payments. Extract dates and concise summaries for review; original email bodies are not stored.
 - Add meeting suggestions to the primary Google Calendar from review, and pin important email summaries to a persistent Important emails section.
 - Run a deterministic, explainable extraction pipeline; review suggestions before accepting them.
-- Store data in local SQLite. Keep source, provenance, and processing status with every imported item.
+- Store data in local SQLite, or PostgreSQL for deployment. Keep source, provenance, and processing status with every imported item.
 - Export/backup can be added without changing the source adapter interfaces.
 
-The app does not connect to phone-operating-system internals or scrape private apps. WhatsApp remains a user-exported `.txt` import. Google integration requires enabling the APIs, adding the local redirect URI, and consenting in OAuth; token data is held in macOS Keychain. Keep `secrets/client_secret.json` local and never commit it.
+The app does not connect to phone-operating-system internals or scrape private apps. WhatsApp remains a user-exported `.txt` import. Google integration requires enabling the APIs, adding the redirect URI, and consenting in OAuth; local token data is held in macOS Keychain, while deployment tokens are Fernet-encrypted in PostgreSQL. Keep the OAuth JSON local or in the hosting provider's secret file; never commit it.
 
 ## Free stack
 
 - Python 3.11+, FastAPI, Pydantic, SQLAlchemy, SQLite, Pillow, and free local Tesseract OCR
 - macOS HEIC conversion uses the built-in `sips` tool; on iPhone, AirDrop a selected photo to the Mac for the local demo
 - pytest for tests; Mermaid for diagrams
-- Ollama runs the Gmail triage model locally; imported chat/photo extraction remains deterministic and explainable.
-- No paid APIs, subscriptions, or proprietary cloud services are required.
-- Google API use is subject to Google's quotas and OAuth consent/testing limits; no paid AI or hosted extraction service is used.
+- Ollama runs Gmail triage locally by default; imported chat/photo extraction remains deterministic and explainable. Deployment may select Cloudflare Workers AI.
+- The local app needs no paid APIs or subscriptions. Hosting depends on current free-plan quotas and limitations.
+- Google API use is subject to Google's quotas and OAuth consent/testing limits. Cloud email classification is optional; local Ollama keeps message content on the machine running the model.
 
 ## Run locally
 
@@ -74,3 +74,16 @@ Gmail scans a configurable recent window (1, 3, 7, or 14 days; default 3), resum
 6. Scan Gmail and review the extracted Security, Meetings/evaluations, Deadlines, and Payments suggestions. Pin messages to Important emails, or add meeting suggestions to Google Calendar.
 
 See the docs for requirements traceability and design justification.
+
+## Free deployment (Render + Neon)
+
+The repository includes a Render Docker Blueprint, PostgreSQL driver, and GitHub Actions schedule. Local Ollama remains the default for development; the hosted app selects the optional Cloudflare Workers AI provider. Render's free web service sleeps when idle and loses local files on restarts, so the deployment uses Neon PostgreSQL for persistent data. The free Render service can take about a minute to wake. Neon currently offers a no-credit-card free plan; check its dashboard for the current quota. These hobby/demo tiers do not provide production reliability guarantees.
+
+1. Create a free Neon project and copy its PostgreSQL connection string. Use the pooled connection string if offered and retain its `sslmode=require` parameter.
+2. Create a free Cloudflare account and an API token scoped to Workers AI, then record the account ID. The configured model is `@cf/google/gemma-4-26b-a4b-it`. Workers AI currently includes 10,000 Neurons/day on the Free plan; requests fail after that allocation unless the account is moved to a paid plan. Do not upgrade or add a payment method if you want to keep this setup free.
+3. In Google Cloud Console, add `https://<your-render-service>.onrender.com/oauth/google/callback` as an authorized redirect URI on the same Web OAuth client. Keep your Google account as an OAuth test user and enable Calendar, Gmail, and Photos Picker APIs. Download its OAuth client JSON; do not commit it.
+4. In Render, create a Blueprint from this GitHub repository and select the free plan. Add `google-oauth.json` as a Secret File at `/etc/secrets/google-oauth.json`. Fill prompted values with the Neon URL, exact Render callback URI, your Google account email, and Cloudflare account ID/token. Generate a Fernet key locally with `python3 -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'`. Render generates the session and cron secrets. Keep credentials in provider dashboards; never paste them into chat or commit them.
+5. After deployment, copy the `https://...onrender.com` URL. In GitHub repository **Settings → Secrets and variables → Actions**, add `IORGANIZER_URL` (base URL without trailing slash) and `IORGANIZER_CRON_SECRET` (copy from Render's environment). Run **Actions → iOrganizer scheduled sync → Run workflow** once to verify the scheduled-sync endpoint. The job checks daily, but Gmail is scanned only when its user-selected interval is due.
+6. Open the Render URL, sign in with the configured Google account, connect Google sources, grant the requested scopes, and let the initial Gmail scan finish. Try a manual note and review item.
+
+If Cloudflare is not configured, set `IORGANIZER_EMAIL_LLM_PROVIDER=ollama` and supply a reachable Ollama host/model; Gmail scanning remains unavailable until that model can be reached. The rest of the organizer can still run. Email text is sent to Cloudflare only when that provider is selected.

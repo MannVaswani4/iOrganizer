@@ -14,7 +14,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
-from fastapi import FastAPI, File, HTTPException, UploadFile, Request
+from fastapi import FastAPI, File, Header, HTTPException, UploadFile, Request
 from fastapi.responses import FileResponse, RedirectResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
@@ -31,7 +31,7 @@ from .domain import Candidate, ItemKind, ItemStatus, OrganizerItem
 from .email_agent import EmailAgentError, LocalEmailTriageAgent
 from .email_store import GmailTriageStore
 from .gmail_scanner import GmailMailboxScanner
-from .persistence import SqlAlchemyItemRepository, make_database
+from .persistence import AppSettingRow, SqlAlchemyItemRepository, make_database
 from .photo_ocr import PhotoOcrError, SUPPORTED_PHOTO_EXTENSIONS, extract_text
 from .services import OrganizerService, accept_candidate
 from . import google_integrations as google
@@ -110,6 +110,7 @@ class ImportantSenderRequest(BaseModel):
 
 
 sessions, _engine = make_database()
+google.configure_credential_storage(sessions)
 service = OrganizerService(SqlAlchemyItemRepository(sessions), AgentPipeline(RuleBasedExtractor()))
 pipeline = AgentPipeline(RuleBasedExtractor())
 gmail_store = GmailTriageStore(sessions)
@@ -261,6 +262,8 @@ def session_secret() -> str:
     configured = os.getenv("IORGANIZER_SESSION_SECRET")
     if configured:
         return configured
+    if os.getenv("RENDER"):
+        raise RuntimeError("Set IORGANIZER_SESSION_SECRET in the deployment environment.")
     try:
         return SESSION_SECRET_FILE.read_text(encoding="utf-8").strip()
     except FileNotFoundError:
@@ -276,17 +279,28 @@ def session_secret() -> str:
 def bind_google_owner(subject: str, email: str) -> bool:
     """Keep this local single-user database bound to its first verified Google identity."""
     owner = {"sub": subject, "email": email.casefold()}
+    allowed_email = os.getenv("IORGANIZER_OWNER_EMAIL", "").casefold()
+    if (os.getenv("RENDER") and not allowed_email) or (allowed_email and email.casefold() != allowed_email):
+        return False
     try:
-        saved = json.loads(OWNER_FILE.read_text(encoding="utf-8"))
-        return saved.get("sub") == subject
-    except FileNotFoundError:
+        with sessions.begin() as session:
+            saved_row = session.get(AppSettingRow, "google_owner")
+            if saved_row:
+                return json.loads(saved_row.value).get("sub") == subject
+            # Migrate the previous local owner file if one exists.
+            if OWNER_FILE.exists():
+                saved = json.loads(OWNER_FILE.read_text(encoding="utf-8"))
+                if saved.get("sub") != subject:
+                    return False
+            session.add(AppSettingRow(name="google_owner", value=json.dumps(owner)))
+        return True
+    except Exception:
         try:
-            OWNER_FILE.write_text(json.dumps(owner), encoding="utf-8")
-            OWNER_FILE.chmod(0o600)
-            return True
-        except FileExistsError:
-            saved = json.loads(OWNER_FILE.read_text(encoding="utf-8"))
-            return saved.get("sub") == subject
+            with sessions() as session:
+                saved_row = session.get(AppSettingRow, "google_owner")
+                return bool(saved_row and json.loads(saved_row.value).get("sub") == subject)
+        except Exception:
+            return False
 
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
@@ -297,7 +311,8 @@ async def require_google_login(request: Request, call_next):
     global authenticated_session_active, active_user_email
     path = request.url.path
     public = (path == "/" or (path.startswith("/static/") and path != "/static/index.html") or path in {
-        "/auth/google", "/auth/logout", "/oauth/google/callback", "/api/v1/health"
+        "/auth/google", "/auth/logout", "/oauth/google/callback", "/api/v1/health",
+        "/api/v1/internal/sync",
     })
     if public or request.session.get("google_user"):
         if request.session.get("google_user"):
@@ -310,7 +325,8 @@ async def require_google_login(request: Request, call_next):
 
 
 app.add_middleware(SessionMiddleware, secret_key=session_secret(), session_cookie="iorganizer_session",
-                   same_site="lax", https_only=False, max_age=60 * 60 * 24 * 30)
+                   same_site="lax", https_only=os.getenv("IORGANIZER_COOKIE_HTTPS_ONLY", "false").casefold()
+                   in {"true", "1", "yes"}, max_age=60 * 60 * 24 * 30)
 
 
 @app.get("/", include_in_schema=False)
@@ -351,6 +367,41 @@ next_suggestion_id = 1
 @app.get("/api/v1/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.post("/api/v1/internal/sync")
+def scheduled_sync(authorization: str | None = Header(default=None)) -> dict:
+    """Free external cron hook; scans only when the saved Gmail interval is due."""
+    secret = os.getenv("IORGANIZER_CRON_SECRET", "")
+    expected = f"Bearer {secret}" if secret else ""
+    if not secret or not secrets.compare_digest(authorization or "", expected):
+        raise HTTPException(404, "Not found.")
+    settings = gmail_store.scan_state()
+    account = google.connection_status()
+    owner_email = os.getenv("IORGANIZER_OWNER_EMAIL", "").casefold()
+    if (not account.get("connected") or not account.get("identity_verified")
+            or not owner_email or account.get("account_email") != owner_email):
+        return {"synced": False, "reason": "Google account is not connected."}
+    calendar_added = 0
+    if account.get("calendar"):
+        try:
+            calendar_added = collect_google_suggestions()
+        except Exception as exc:
+            logger.warning("Scheduled Calendar sync failed (%s)", type(exc).__name__)
+    last_scan = datetime.fromisoformat(settings["last_scan_at"]) if settings["last_scan_at"] else None
+    if last_scan and last_scan.tzinfo is None:
+        last_scan = last_scan.replace(tzinfo=timezone.utc)
+    retry_after = (timedelta(minutes=30) if settings["last_error"] else
+                   timedelta(days=settings.get("scan_interval_days", 3)))
+    scan_due = (not settings["initial_complete"] or last_scan is None
+                or datetime.now(timezone.utc) - last_scan >= retry_after)
+    gmail_started = False
+    if account.get("gmail") and scan_due and not gmail_scan_running:
+        try:
+            gmail_started = start_gmail_scan()
+        except EmailAgentError as exc:
+            raise HTTPException(503, str(exc)) from exc
+    return {"synced": True, "calendar_added": calendar_added, "gmail_scan_started": gmail_started}
 
 
 @app.get("/api/v1/auth/me")

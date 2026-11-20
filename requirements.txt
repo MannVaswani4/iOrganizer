@@ -9,3 +9,5 @@ google-auth>=2.35,<3
 google-auth-oauthlib>=1.2,<2
 keyring>=25,<27
 itsdangerous>=2.2,<3
+cryptography>=43,<47
+psycopg[binary]>=3.2,<4
