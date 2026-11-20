@@ -2,6 +2,8 @@
 
 **A private, local-first personal information hub** for collecting useful items from calendars, chat exports, and quick notes, then turning them into searchable, actionable information.
 
+Sign in with the Google account that owns the connected sources. The first verified sign-in binds this local workspace to that Google identity. The app requires a signed Google session before serving organizer APIs; use **Sign out** in the app header to end the session.
+
 This repository is the capstone project for **System Design and Agentic AI**. It includes the requirements, LLD, diagrams, API and database design, and a modular working MVP. The MVP runs locally and uses free, open-source software only.
 
 ## Problem and solution
@@ -50,7 +52,7 @@ brew services start ollama
 ollama pull qwen2.5:1.5b
 ```
 
-Gmail scans messages received in the last three days, resumes from a local SQLite checkpoint, and automatically refreshes that window every three days while iOrganizer is running. Calendar syncs every 30 minutes. If you already connected Google before enabling meeting creation, click **Enable Calendar event creation** and approve the updated permission once. In OAuth Testing mode, Google may expire refresh tokens after seven days, requiring reconnection. Google Photos uses a separate Picker session and imports up to 10 selected images per session for local OCR.
+Gmail scans a configurable recent window (1, 3, 7, or 14 days; default 3), resumes from a local SQLite checkpoint, and automatically refreshes on that cadence while iOrganizer is running. Addresses added under **Important emails** also include matching messages in Gmail search, bypass importance filtering, and receive local summaries. Calendar syncs every 30 minutes. If you already connected Google before enabling meeting creation, click **Reconnect Google to enable Calendar events** and approve the updated permission once. In OAuth Testing mode, Google may expire refresh tokens after seven days, requiring reconnection. Google Photos uses a separate Picker session and imports up to 10 selected images per session for local OCR.
 
 ## Repository guide
 

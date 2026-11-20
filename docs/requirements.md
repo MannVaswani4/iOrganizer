@@ -17,6 +17,7 @@ Collect user-selected information from scattered sources into one private, searc
 
 | ID | Requirement | Acceptance evidence |
 |---|---|---|
+| FR-0 | Sign in with a verified Google identity before using organizer APIs; provide sign-out | `/auth/google`, `/auth/logout`, signed session middleware |
 | FR-1 | Create a note, task, event or link with title, body, category and optional due/event time | `POST /api/v1/items` |
 | FR-2 | List and search saved items by title/body | `GET /api/v1/items?q=...` |
 | FR-3 | Retrieve and delete an item by ID | Item GET and DELETE endpoints |
@@ -28,15 +29,15 @@ Collect user-selected information from scattered sources into one private, searc
 | FR-8 | Preserve source and provenance for imported suggestions | `source_ref` in suggestion response; `source=import` on accepted item |
 | FR-9 | Connect Google; read Calendar, Gmail, and Photos Picker sources; request Calendar event write access only for user-triggered event creation | `/api/v1/google/authorize`, `/api/v1/google/sync` |
 | FR-10 | Import only Google Photos explicitly selected through Picker; OCR locally | `/api/v1/google/photos/sessions` |
-| FR-11 | Deduplicate Google records; refresh Calendar every 30 minutes and Gmail's rolling three-day window every three days while the app is running | Source IDs, `/api/v1/google/status` |
-| FR-12 | Scan Gmail messages received in the last three days, excluding Spam/Trash/Drafts, and keep only security, meeting/evaluation, deadline, and payment actions | `/api/v1/google/gmail/scan` |
+| FR-11 | Deduplicate Google records; refresh Calendar every 30 minutes and Gmail on a configurable 1/3/7/14-day window/cadence while the app is running | Source IDs, `/api/v1/google/status`, `/api/v1/google/gmail/scan/settings` |
+| FR-12 | Scan recent Gmail messages, excluding Spam/Trash/Drafts; retain actionable security, meeting/evaluation, deadline, and payment summaries, plus all messages from explicitly included sender addresses | `/api/v1/google/gmail/scan`, `/api/v1/google/gmail/important-senders` |
 | FR-13 | Extract concise summary and dates; add meeting suggestions to Google Calendar after a user action | `LocalEmailTriageAgent`, `/api/v1/suggestions/{id}/calendar-event` |
-| FR-14 | Pin/unpin important email summaries in a persistent dedicated section | `/api/v1/google/gmail/saved`, `/api/v1/suggestions/{id}/pin` |
+| FR-14 | Pin/unpin important email summaries and always include selected sender addresses with local summaries and source links | `/api/v1/google/gmail/saved`, `/api/v1/google/gmail/important-senders`, `/api/v1/suggestions/{id}/pin` |
 | FR-15 | Persist scan checkpoints and message IDs to resume safely without retaining unimportant email bodies | `GmailTriageStore` in local SQLite |
 
 ## Non-functional requirements
 
-- **Privacy:** local storage; Gmail read-only and explicit Photos selection; event writes require a user click and a Calendar write scope; email inference uses Ollama on loopback with no hosted model.
+- **Privacy:** Google sign-in gates organizer APIs; local storage; Gmail read-only and explicit Photos selection; event writes require a user click and a Calendar write scope; email inference uses Ollama on loopback with no hosted model.
 - **Cost:** every required runtime component is free/open-source; optional AI runs locally.
 - **Maintainability:** depend on repository and extractor abstractions, not concrete implementations.
 - **Usability:** OpenAPI docs at `/docs`; imports return suggestions for review.

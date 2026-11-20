@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+from email.utils import parseaddr
 import hashlib
+import json
 import logging
+import os
 import secrets
 import threading
 import time
@@ -16,7 +19,12 @@ from fastapi.responses import FileResponse, RedirectResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 from fastapi.concurrency import run_in_threadpool
+from starlette.middleware.sessions import SessionMiddleware
+from starlette.responses import JSONResponse
 from pydantic import BaseModel, Field
+from google.auth.transport.requests import Request as GoogleAuthRequest
+from google.oauth2 import id_token as google_id_token
+from google_auth_oauthlib.flow import Flow
 
 from .agents import AgentPipeline, RuleBasedExtractor
 from .domain import Candidate, ItemKind, ItemStatus, OrganizerItem
@@ -76,6 +84,7 @@ class SuggestionResponse(BaseModel):
     event_start_at: str | None = None
     event_end_at: str | None = None
     is_pinned: bool = False
+    sender_email: str | None = None
 
 
 class CalendarEventRequest(BaseModel):
@@ -83,12 +92,21 @@ class CalendarEventRequest(BaseModel):
     end_at: datetime | None = None
 
 
+class GmailScanSettingsRequest(BaseModel):
+    interval_days: int = Field(ge=1, le=30)
+
+
 class SavedEmailResponse(BaseModel):
     message_id: str
     title: str
     summary: str
     category: str
+    sender_email: str | None = None
     received_at: str | None
+
+
+class ImportantSenderRequest(BaseModel):
+    sender_email: str = Field(min_length=3, max_length=320)
 
 
 sessions, _engine = make_database()
@@ -97,14 +115,17 @@ pipeline = AgentPipeline(RuleBasedExtractor())
 gmail_store = GmailTriageStore(sessions)
 email_agent = LocalEmailTriageAgent()
 gmail_scanner = GmailMailboxScanner(gmail_store, email_agent)
-oauth_states: dict[str, tuple[float, str]] = {}
+oauth_states: dict[str, tuple[float, str, str]] = {}
 photo_sessions: dict[str, tuple[str, float]] = {}
+login_oauth_states: dict[str, tuple[float, str, str]] = {}
 last_google_sync: str | None = None
 google_sync_error: str | None = None
 suggestion_lock = threading.Lock()
 gmail_scan_lock = threading.Lock()
 gmail_scan_running = False
 gmail_scan_error: str | None = None
+authenticated_session_active = False
+active_user_email: str | None = None
 calendar_event_lock = threading.Lock()
 
 
@@ -116,6 +137,7 @@ def suggestion_response(suggestion_id: int, candidate: Candidate) -> SuggestionR
         event_start_at=candidate.event_start_at.isoformat() if candidate.event_start_at else None,
         event_end_at=candidate.event_end_at.isoformat() if candidate.event_end_at else None,
         is_pinned=candidate.is_pinned,
+        sender_email=candidate.sender_email,
     )
 
 
@@ -189,8 +211,10 @@ async def auto_google_sync() -> None:
     global google_sync_error
     while True:
         try:
-            status = google.connection_status()
-            if status.get("connected"):
+            status = google.connection_status() if authenticated_session_active else {"connected": False}
+            signed_in_email = active_user_email or ""
+            if (status.get("connected") and status.get("identity_verified")
+                    and status.get("account_email") == signed_in_email):
                 now = datetime.now().astimezone()
                 last_sync = datetime.fromisoformat(last_google_sync) if last_google_sync else None
                 last_sync = (last_sync.replace(tzinfo=now.tzinfo) if last_sync and last_sync.tzinfo is None
@@ -201,7 +225,8 @@ async def auto_google_sync() -> None:
                 last_scan = datetime.fromisoformat(scan_state["last_scan_at"]) if scan_state["last_scan_at"] else None
                 if last_scan and last_scan.tzinfo is None:
                     last_scan = last_scan.replace(tzinfo=timezone.utc)
-                retry_after = timedelta(minutes=30) if scan_state["last_error"] else timedelta(days=3)
+                retry_after = (timedelta(minutes=30) if scan_state["last_error"] else
+                               timedelta(days=scan_state.get("scan_interval_days", 3)))
                 scan_due = (not scan_state["initial_complete"] or last_scan is None or
                             now - last_scan >= retry_after)
                 if (status.get("gmail") and email_agent.status()["model_ready"] and
@@ -226,12 +251,97 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(title="iOrganizer", version="0.1.0", description="Local-first personal information organizer", lifespan=lifespan)
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+SESSION_SECRET_FILE = DATA_DIR / "session_secret"
+OWNER_FILE = DATA_DIR / "google_owner.json"
+
+
+def session_secret() -> str:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    configured = os.getenv("IORGANIZER_SESSION_SECRET")
+    if configured:
+        return configured
+    try:
+        return SESSION_SECRET_FILE.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        value = secrets.token_urlsafe(48)
+        try:
+            SESSION_SECRET_FILE.write_text(value, encoding="utf-8")
+            SESSION_SECRET_FILE.chmod(0o600)
+            return value
+        except FileExistsError:
+            return SESSION_SECRET_FILE.read_text(encoding="utf-8").strip()
+
+
+def bind_google_owner(subject: str, email: str) -> bool:
+    """Keep this local single-user database bound to its first verified Google identity."""
+    owner = {"sub": subject, "email": email.casefold()}
+    try:
+        saved = json.loads(OWNER_FILE.read_text(encoding="utf-8"))
+        return saved.get("sub") == subject
+    except FileNotFoundError:
+        try:
+            OWNER_FILE.write_text(json.dumps(owner), encoding="utf-8")
+            OWNER_FILE.chmod(0o600)
+            return True
+        except FileExistsError:
+            saved = json.loads(OWNER_FILE.read_text(encoding="utf-8"))
+            return saved.get("sub") == subject
+
+
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
+@app.middleware("http")
+async def require_google_login(request: Request, call_next):
+    global authenticated_session_active, active_user_email
+    path = request.url.path
+    public = (path == "/" or (path.startswith("/static/") and path != "/static/index.html") or path in {
+        "/auth/google", "/auth/logout", "/oauth/google/callback", "/api/v1/health"
+    })
+    if public or request.session.get("google_user"):
+        if request.session.get("google_user"):
+            authenticated_session_active = True
+            active_user_email = request.session["google_user"].get("email", "").casefold()
+        return await call_next(request)
+    if path.startswith("/api/"):
+        return JSONResponse({"detail": "Sign in with Google to use iOrganizer."}, status_code=401)
+    return RedirectResponse("/", status_code=303)
+
+
+app.add_middleware(SessionMiddleware, secret_key=session_secret(), session_cookie="iorganizer_session",
+                   same_site="lax", https_only=False, max_age=60 * 60 * 24 * 30)
+
+
 @app.get("/", include_in_schema=False)
-def frontend() -> FileResponse:
-    return FileResponse(STATIC_DIR / "index.html")
+def frontend(request: Request) -> FileResponse:
+    page = "index.html" if request.session.get("google_user") else "landing.html"
+    return FileResponse(STATIC_DIR / page)
+
+
+@app.get("/auth/google", include_in_schema=False)
+def google_login(request: Request):
+    if not google.CLIENT_FILE.is_file():
+        raise HTTPException(503, "Google OAuth client configuration is missing.")
+    try:
+        flow = Flow.from_client_secrets_file(str(google.CLIENT_FILE), scopes=list(google.IDENTITY_SCOPES))
+        flow.redirect_uri = google.REDIRECT_URI
+        nonce = secrets.token_urlsafe(24)
+        request.session["login_state"] = nonce
+        url, state = flow.authorization_url(access_type="offline", prompt="select_account")
+    except Exception as exc:
+        raise HTTPException(503, "Could not start Google sign-in.") from exc
+    login_oauth_states[state] = (time.time() + 600, flow.code_verifier or "", nonce)
+    return RedirectResponse(url)
+
+
+@app.get("/auth/logout", include_in_schema=False)
+def google_logout(request: Request):
+    global authenticated_session_active, active_user_email
+    request.session.clear()
+    authenticated_session_active = False
+    active_user_email = None
+    return RedirectResponse("/", status_code=303)
 
 
 suggestions: dict[int, Candidate] = {}
@@ -243,16 +353,66 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/api/v1/auth/me")
+def auth_me(request: Request) -> dict:
+    return request.session["google_user"]
+
+
 @app.get("/api/v1/google/status")
 def google_status() -> dict:
+    scan_state = gmail_store.scan_state()
     return {**google.connection_status(), "last_sync": last_google_sync,
             "sync_error": google_sync_error, "sync_interval_minutes": 30,
-            "gmail_scan_interval_days": 3}
+            "gmail_scan_interval_days": scan_state.get("scan_interval_days", 3)}
+
+
+def require_linked_google_account() -> dict:
+    status = google.connection_status()
+    if (not status.get("identity_verified") or
+            status.get("account_email") != (active_user_email or "")):
+        raise HTTPException(403, "Reconnect Google and link the same account you used to sign in.")
+    return status
+
+
+@app.patch("/api/v1/google/gmail/scan/settings")
+def update_gmail_scan_settings(request: GmailScanSettingsRequest) -> dict:
+    gmail_store.set_scan_interval_days(request.interval_days)
+    return {"interval_days": request.interval_days}
 
 
 @app.get("/api/v1/google/gmail/saved", response_model=list[SavedEmailResponse])
 def list_saved_emails() -> list[SavedEmailResponse]:
     return [SavedEmailResponse(**record) for record in gmail_store.saved_emails()]
+
+
+@app.get("/api/v1/google/gmail/important-senders")
+def list_important_senders() -> dict:
+    return {"senders": gmail_store.important_senders()}
+
+
+@app.post("/api/v1/google/gmail/important-senders", status_code=201)
+def add_important_sender(request: ImportantSenderRequest) -> dict:
+    email = request.sender_email.strip().casefold()
+    parsed = parseaddr(email)[1]
+    if parsed != email or email.count("@") != 1 or any(ch.isspace() for ch in email):
+        raise HTTPException(422, "Enter one valid sender email address.")
+    gmail_store.add_important_sender(email)
+    with suggestion_lock:
+        for suggestion_id, candidate in list(suggestions.items()):
+            if candidate.sender_email and candidate.sender_email.casefold() == email:
+                suggestions.pop(suggestion_id, None)
+    restore_gmail_suggestions()
+    started = False
+    linked = google.connection_status()
+    if (linked.get("identity_verified") and linked.get("account_email") == (active_user_email or "")
+            and linked.get("gmail") and email_agent.status()["model_ready"]):
+        started = start_gmail_scan()
+    return {"sender_email": email, "senders": gmail_store.important_senders(), "scan_started": started}
+
+
+@app.delete("/api/v1/google/gmail/important-senders/{sender_email}", status_code=204)
+def remove_important_sender(sender_email: str) -> None:
+    gmail_store.remove_important_sender(sender_email)
 
 
 @app.delete("/api/v1/google/gmail/saved/{message_id}", status_code=204)
@@ -305,7 +465,7 @@ def create_suggestion_calendar_event(suggestion_id: int, request: CalendarEventR
     if (candidate is None or candidate.category != "meeting" or not candidate.source_ref
             or not candidate.source_ref.startswith("gmail:")):
         raise HTTPException(404, "Meeting suggestion not found")
-    if not google.connection_status().get("calendar_write"):
+    if not require_linked_google_account().get("calendar_write"):
         raise HTTPException(403, "Enable Google Calendar event creation, then retry.")
     message_id = candidate.source_ref.removeprefix("gmail:")
     start_at = request.start_at or candidate.event_start_at
@@ -324,9 +484,11 @@ def create_suggestion_calendar_event(suggestion_id: int, request: CalendarEventR
         event_id = row.calendar_event_id if row else None
         if not event_id:
             event_id = hashlib.sha256(f"iorganizer:{message_id}".encode()).hexdigest()
+            original_email_url = f"https://mail.google.com/mail/u/0/#all/{message_id}"
+            event_description = f"{candidate.body}\n\nOriginal source email: {original_email_url}"
             try:
                 google.create_calendar_event(event_id=event_id, title=candidate.title,
-                                             description=candidate.body, start_at=start_at, end_at=end_at)
+                                             description=event_description, start_at=start_at, end_at=end_at)
             except google.GoogleNotConnected as exc:
                 raise HTTPException(401, str(exc)) from exc
             except google.GoogleIntegrationError as exc:
@@ -334,7 +496,9 @@ def create_suggestion_calendar_event(suggestion_id: int, request: CalendarEventR
         source_ref = f"google-calendar:{event_id}"
         item = next((saved for saved in service.list_items() if saved.source_ref == source_ref), None)
         if item is None:
-            calendar_candidate = replace(candidate, kind=ItemKind.EVENT, due_at=start_at,
+            original_email_url = f"https://mail.google.com/mail/u/0/#all/{message_id}"
+            body = f"{candidate.body}\n\nOriginal source email: {original_email_url}"
+            calendar_candidate = replace(candidate, body=body, kind=ItemKind.EVENT, due_at=start_at,
                                          event_start_at=start_at, event_end_at=end_at,
                                          source_ref=source_ref)
             item = accept_candidate(service, calendar_candidate)
@@ -354,7 +518,7 @@ def gmail_scan_status() -> dict:
 
 @app.post("/api/v1/google/gmail/scan")
 def gmail_scan_start() -> dict:
-    connection = google.connection_status()
+    connection = require_linked_google_account()
     if not connection.get("gmail"):
         raise HTTPException(401, "Connect Google and grant Gmail read access first.")
     try:
@@ -365,22 +529,60 @@ def gmail_scan_start() -> dict:
 
 
 @app.get("/api/v1/google/authorize")
-def google_authorize():
+def google_authorize(request: Request):
     try:
         url, state, code_verifier = google.authorization_url()
     except google.GoogleIntegrationError as exc:
         raise HTTPException(503, str(exc)) from exc
-    oauth_states[state] = (time.time() + 600, code_verifier)
+    oauth_states[state] = (time.time() + 600, code_verifier,
+                           (request.session.get("google_user") or {}).get("email", "").casefold())
     return RedirectResponse(url)
 
 
 @app.get("/oauth/google/callback", include_in_schema=False)
 async def google_callback(request: Request):
+    global authenticated_session_active, active_user_email
     state = request.query_params.get("state", "")
+    login_oauth_state = login_oauth_states.pop(state, None)
+    if login_oauth_state:
+        expires, code_verifier, expected_state = login_oauth_state
+        if expires < time.time():
+            raise HTTPException(400, "Google sign-in expired. Return to iOrganizer and try again.")
+        if request.session.get("login_state") != expected_state:
+            raise HTTPException(400, "Google sign-in state did not match. Start again from iOrganizer.")
+        if request.query_params.get("error"):
+            return HTMLResponse("<h2>Google sign-in was not completed.</h2><p>Return to iOrganizer and try again.</p>", status_code=400)
+        try:
+            flow = Flow.from_client_secrets_file(str(google.CLIENT_FILE), scopes=list(google.IDENTITY_SCOPES), state=state)
+            flow.redirect_uri = google.REDIRECT_URI
+            flow.code_verifier = code_verifier
+            google.exchange_oauth_code(flow, str(request.url))
+            claims = google_id_token.verify_oauth2_token(
+                flow.credentials.id_token, GoogleAuthRequest(), flow.client_config["client_id"]
+            )
+            if not claims.get("email_verified") or not claims.get("email") or not claims.get("sub"):
+                raise ValueError("Google did not return a verified account email.")
+            if not bind_google_owner(claims["sub"], claims["email"]):
+                return HTMLResponse("<h2>This iOrganizer workspace belongs to a different Google account.</h2>",
+                                    status_code=403)
+            request.session.clear()
+            request.session["google_user"] = {
+                "sub": claims["sub"], "email": claims["email"],
+                "name": claims.get("name") or claims["email"],
+                "picture": claims.get("picture", ""),
+            }
+            authenticated_session_active = True
+            active_user_email = claims["email"].casefold()
+            return RedirectResponse("/")
+        except Exception as exc:
+            logger.exception("Google identity sign-in failed (%s)", type(exc).__name__)
+            raise HTTPException(502, "Google sign-in could not be verified. Start again from iOrganizer.") from exc
     oauth_state = oauth_states.pop(state, None)
-    expires, code_verifier = oauth_state if oauth_state else (0, "")
+    expires, code_verifier, expected_email = oauth_state if oauth_state else (0, "", "")
     if not state or expires < time.time():
         raise HTTPException(400, "Google sign-in expired. Return to iOrganizer and connect again.")
+    if expected_email != (request.session.get("google_user") or {}).get("email", "").casefold():
+        raise HTTPException(400, "Google connection state did not match your signed-in account. Start again.")
     if request.query_params.get("error"):
         return HTMLResponse("<h2>Google connection was not completed.</h2><p>Return to iOrganizer and try again.</p>", status_code=400)
     try:
@@ -394,7 +596,16 @@ async def google_callback(request: Request):
                 502,
                 f"Google rejected the sign-in token exchange ({type(exc).__name__}). Start a fresh sign-in; if it repeats, share the server log error without sharing the callback URL.",
             ) from exc
-        google.save_credentials(flow.credentials)
+        try:
+            linked_account = google_id_token.verify_oauth2_token(
+                flow.credentials.id_token, GoogleAuthRequest(), flow.client_config["client_id"]
+            )
+        except Exception as exc:
+            raise HTTPException(403, "Reconnect Google and grant account identity access to link sources safely.") from exc
+        signed_in_email = (request.session.get("google_user") or {}).get("email", "").casefold()
+        if linked_account.get("email", "").casefold() != signed_in_email:
+            raise HTTPException(403, "Connect the same Google account you used to sign in to iOrganizer.")
+        google.save_credentials(flow.credentials, account_email=linked_account.get("email", ""))
         await run_in_threadpool(collect_google_suggestions)
     except google.GoogleIntegrationError as exc:
         raise HTTPException(502, str(exc)) from exc
@@ -414,6 +625,7 @@ def google_disconnect() -> None:
 async def google_sync() -> dict:
     global google_sync_error
     try:
+        require_linked_google_account()
         added = await run_in_threadpool(collect_google_suggestions)
         return {"added": added, "last_sync": last_google_sync}
     except google.GoogleNotConnected as exc:
@@ -425,6 +637,7 @@ async def google_sync() -> dict:
 
 @app.post("/api/v1/google/photos/sessions")
 def google_photos_create() -> dict:
+    require_linked_google_account()
     try:
         result = google.create_photos_session()
     except google.GoogleNotConnected as exc:
@@ -447,6 +660,7 @@ def get_photo_session(session_key: str) -> str:
 
 @app.get("/api/v1/google/photos/sessions/{session_key}")
 def google_photos_status(session_key: str) -> dict:
+    require_linked_google_account()
     try:
         result = google.get_photos_session(get_photo_session(session_key))
         return {"ready": result["ready"], "polling_config": result.get("polling_config", {})}
@@ -458,6 +672,7 @@ def google_photos_status(session_key: str) -> dict:
 
 @app.post("/api/v1/google/photos/sessions/{session_key}/import")
 async def google_photos_import(session_key: str) -> dict:
+    require_linked_google_account()
     global next_suggestion_id
     session_id = get_photo_session(session_key)
     try:

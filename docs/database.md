@@ -1,6 +1,6 @@
 # Database schema
 
-Database: local SQLite (`./data/iorganizer.db`), created automatically. SQLAlchemy model currently persists `items`; import suggestions live in memory for the single-process demo and should move into these tables before multi-worker deployment.
+Database: local SQLite (`./data/iorganizer.db`), created automatically. SQLAlchemy persists organizer items, Gmail summaries and scan state, and sender inclusion rules. Import suggestions live in memory for the single-process demo and should move into these tables before multi-worker deployment.
 
 ## `items`
 
@@ -18,15 +18,19 @@ Database: local SQLite (`./data/iorganizer.db`), created automatically. SQLAlche
 | `created_at` | DATETIME | Not null UTC |
 | `updated_at` | DATETIME | Not null UTC |
 
-The class `OrganizerItem` maps one-to-one to `items`. There is no user table in the local single-user MVP. The API receives UUID primary keys; imports carry provenance in candidate `source_ref`, which is retained when accepted.
+The class `OrganizerItem` maps one-to-one to `items`. Google identity is held in a signed local session cookie; its signing key and the first verified workspace owner are stored in ignored files under `data/`. The API receives UUID primary keys; imports carry provenance in candidate `source_ref`, which is retained when accepted.
 
 ## `gmail_message_triage`
 
-One row per processed Gmail message. The primary key is the Gmail message ID for deduplication and restart safety. `is_important` is true only for security, meeting/evaluation, deadline, and payment actions. `title`, `summary`, extracted `due_at`, `event_start_at`, and `event_end_at` contain selected information only; raw body and sender are not stored. `review_state` tracks pending/accepted/dismissed/ignored; `is_pinned` preserves a chosen summary in Important emails. `calendar_event_id` prevents duplicate Calendar creation, and `triage_version` allows rule/model changes to reprocess messages.
+One row per processed Gmail message. The primary key is the Gmail message ID for deduplication and restart safety. `sender_email` supports user-approved sender rules. `is_important` is true for selected security, meeting/evaluation, deadline, and payment actions or always-included sender messages. `title`, `summary`, extracted `due_at`, `event_start_at`, and `event_end_at` contain selected information only; raw body is not stored. `review_state` tracks pending/accepted/dismissed/ignored; `is_pinned` preserves a chosen summary in Important emails. `calendar_event_id` prevents duplicate Calendar creation, and `triage_version` allows rule/model changes to reprocess messages.
+
+## `important_senders`
+
+Stores sender email addresses explicitly chosen by the user for automatic inclusion. Matching messages are summarized locally and appear in Important emails without importance filtering.
 
 ## `gmail_scan_state`
 
-Single-row local checkpoint with Gmail `page_token`, whether the initial three-day scan is complete, active scan kind, counters, triage version, last scan timestamp, and last error. A changed classifier version restarts pagination within the configured three-day window. Scan state is single-user and keyed by ID 1.
+Single-row local checkpoint with Gmail `page_token`, whether the initial scan is complete, active scan kind, counters, triage version, configurable interval, last scan timestamp, and last error. A changed classifier version restarts pagination within the configured scan window. Scan state is single-user and keyed by ID 1.
 
 ## Indexes and relationships
 

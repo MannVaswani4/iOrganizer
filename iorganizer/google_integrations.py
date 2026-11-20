@@ -25,16 +25,23 @@ from .photo_ocr import PhotoOcrError, extract_text
 
 CALENDAR_READ_SCOPE = "https://www.googleapis.com/auth/calendar.events.readonly"
 CALENDAR_WRITE_SCOPE = "https://www.googleapis.com/auth/calendar.events"
+IDENTITY_SCOPES = (
+    "openid",
+    "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/userinfo.profile",
+)
 SCOPES = (
+    *IDENTITY_SCOPES,
     CALENDAR_WRITE_SCOPE,
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/photospicker.mediaitems.readonly",
 )
 CALENDAR_SCOPE = CALENDAR_WRITE_SCOPE
-GMAIL_SCOPE = SCOPES[1]
-PHOTOS_SCOPE = SCOPES[2]
+GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
+PHOTOS_SCOPE = "https://www.googleapis.com/auth/photospicker.mediaitems.readonly"
 KEYRING_SERVICE = "iorganizer-google-oauth"
 KEYRING_ACCOUNT = "local-user"
+KEYRING_IDENTITY_ACCOUNT = "local-user-google-identity"
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CLIENT_FILE = Path(os.getenv("IORGANIZER_GOOGLE_CLIENT_FILE", str(PROJECT_ROOT / "secrets/client_secret.json")))
 REDIRECT_URI = "http://127.0.0.1:8765/oauth/google/callback"
@@ -70,9 +77,11 @@ class CalendarConnector(GoogleSource):
 class GmailMessagesConnector:
     """Paged Gmail API adapter used by the long-running local triage worker."""
 
-    def list_page(self, session: AuthorizedSession, *, page_token: str | None, recent_only: bool) -> dict:
-        params: dict[str, str | int] = {"maxResults": 500, "includeSpamTrash": "false",
-                                        "q": "newer_than:3d -in:drafts"}
+    def list_page(self, session: AuthorizedSession, *, page_token: str | None, recent_only: bool,
+                  days_back: int = 3, sender_emails: list[str] | None = None) -> dict:
+        terms = [f"newer_than:{days_back}d", *(f"from:{address}" for address in (sender_emails or []))]
+        query = "{" + " ".join(terms) + "} -in:drafts" if sender_emails else f"newer_than:{days_back}d -in:drafts"
+        params: dict[str, str | int] = {"maxResults": 500, "includeSpamTrash": "false", "q": query}
         if page_token:
             params["pageToken"] = page_token
         return _raise_google_error(
@@ -138,9 +147,11 @@ def exchange_oauth_code(flow: Flow, callback_url: str) -> None:
                 os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = old_value
 
 
-def save_credentials(credentials: Credentials) -> None:
+def save_credentials(credentials: Credentials, *, account_email: str | None = None) -> None:
     try:
         keyring.set_password(KEYRING_SERVICE, KEYRING_ACCOUNT, credentials.to_json())
+        if account_email:
+            keyring.set_password(KEYRING_SERVICE, KEYRING_IDENTITY_ACCOUNT, account_email.casefold())
     except Exception as exc:
         raise GoogleIntegrationError(
             "Could not store Google tokens in macOS Keychain. Check that the Keychain is available."
@@ -186,8 +197,14 @@ def connection_status() -> dict:
                 "gmail": False, "photos": False,
                 "scopes": [], "error": str(exc)}
     granted = set(credentials.granted_scopes or credentials.scopes or [])
+    try:
+        linked_email = keyring.get_password(KEYRING_SERVICE, KEYRING_IDENTITY_ACCOUNT)
+    except Exception:
+        linked_email = None
     return {
         "connected": True,
+        "identity_verified": bool(linked_email),
+        "account_email": linked_email,
         "calendar": CALENDAR_SCOPE in granted or CALENDAR_READ_SCOPE in granted,
         "calendar_write": CALENDAR_SCOPE in granted,
         "gmail": GMAIL_SCOPE in granted,
@@ -197,12 +214,13 @@ def connection_status() -> dict:
 
 
 def disconnect_google() -> None:
-    try:
-        keyring.delete_password(KEYRING_SERVICE, KEYRING_ACCOUNT)
-    except keyring.errors.PasswordDeleteError:
-        pass
-    except Exception as exc:
-        raise GoogleIntegrationError("Could not remove Google authorization from Keychain.") from exc
+    for account in (KEYRING_ACCOUNT, KEYRING_IDENTITY_ACCOUNT):
+        try:
+            keyring.delete_password(KEYRING_SERVICE, account)
+        except keyring.errors.PasswordDeleteError:
+            continue
+        except Exception as exc:
+            raise GoogleIntegrationError("Could not remove Google authorization from Keychain.") from exc
 
 
 class _TextOnly(HTMLParser):
@@ -294,6 +312,8 @@ def sync_calendar(pipeline: AgentPipeline, session: AuthorizedSession) -> list[C
             elif start.get("date"):
                 due_at = datetime.combine(date.fromisoformat(start["date"]), time.min, tzinfo=timezone.utc)
             details = [event.get("description", ""), event.get("location", "")]
+            if event.get("htmlLink"):
+                details.append(f"Open in Google Calendar: {event['htmlLink']}")
             body = "\n".join(str(part).strip() for part in details if part and str(part).strip())
             candidates.append(Candidate(title=title[:200], body=body[:20_000], kind=ItemKind.EVENT,
                                         category="google calendar", due_at=due_at,

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from email.header import decode_header, make_header
+from email.utils import parseaddr
 import re
 from typing import Callable
 
@@ -50,6 +51,8 @@ class GmailMailboxScanner:
         credentials = load_credentials(required_scope=GMAIL_SCOPE)
         session = AuthorizedSession(credentials)
         state = self.store.scan_state()
+        days_back = state.get("scan_interval_days", 3)
+        sender_emails = self.store.important_senders()
         same_version = state["triage_version"] == TRIAGE_VERSION
         initial_complete = state["initial_complete"] if same_version else False
         recent_only = initial_complete
@@ -60,7 +63,9 @@ class GmailMailboxScanner:
         important_total = state["important_found"] if same_version else 0
         try:
             while True:
-                result = self.connector.list_page(session, page_token=page_token, recent_only=recent_only)
+                result = self.connector.list_page(session, page_token=page_token,
+                                                  recent_only=recent_only, days_back=days_back,
+                                                  sender_emails=sender_emails)
                 references = result.get("messages", [])
                 message_ids = [item.get("id", "") for item in references if item.get("id")]
                 known = self.store.processed_ids(message_ids)
@@ -77,11 +82,18 @@ class GmailMailboxScanner:
                                for h in payload.get("headers", [])}
                     subject = _header_text(headers.get("subject", "Important email") or "Important email", 300).strip()
                     sender = _header_text(headers.get("from", ""), 300).strip()
+                    sender_email = parseaddr(sender)[1].strip().casefold()
                     body = _decode_gmail_body(payload) or str(message.get("snippet", ""))
                     internal_ms = message.get("internalDate")
                     received_at = (datetime.fromtimestamp(int(internal_ms) / 1000, timezone.utc)
                                    if internal_ms else None)
-                    if _is_marketing_message(message, headers, subject, body):
+                    always_include = self.store.is_sender_always_included(sender_email)
+                    if always_include:
+                        triage = self.agent.summarize(
+                            subject=subject, sender=sender,
+                            received_at=received_at.isoformat() if received_at else "", body=body,
+                        )
+                    elif _is_marketing_message(message, headers, subject, body):
                         triage = EmailTriageResult(False, "", "none")
                     else:
                         triage = self.agent.classify(
@@ -91,6 +103,7 @@ class GmailMailboxScanner:
                         )
                     records.append({
                         "message_id": message_id,
+                        "sender_email": sender_email,
                         "is_important": triage.important,
                         "title": subject if triage.important else None,
                         "summary": triage.summary if triage.important else None,
@@ -99,9 +112,10 @@ class GmailMailboxScanner:
                         "due_at": triage.due_at if triage.important else None,
                         "event_start_at": triage.event_start_at if triage.important else None,
                         "event_end_at": triage.event_end_at if triage.important else None,
+                        "auto_saved": always_include,
                     })
                     classified += 1
-                    if triage.important and self.store.should_review(message_id):
+                    if triage.important and not always_include and self.store.should_review(message_id):
                         important_total += 1
                         is_meeting = triage.category == "meeting"
                         candidates.append(Candidate(
@@ -113,8 +127,9 @@ class GmailMailboxScanner:
                             event_start_at=triage.event_start_at,
                             event_end_at=triage.event_end_at,
                             is_pinned=self.store.is_pinned(message_id),
+                            sender_email=sender_email,
                         ))
-                    else:
+                    elif not always_include:
                         ignored_refs.append(f"gmail:{message_id}")
                     if len(records) >= 10:
                         self.store.record_many(records)

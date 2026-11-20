@@ -64,6 +64,7 @@ class Candidate:
     event_start_at: datetime | None = None
     event_end_at: datetime | None = None
     is_pinned: bool = False
+    sender_email: str | None = None
 
 
 @dataclass
